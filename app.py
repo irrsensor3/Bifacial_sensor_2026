@@ -1,412 +1,549 @@
-"""
-Bifacial sensor data logger — 24 irradiance/temperature sensors (8 per
-bus) across 3 independent I2C buses. Works fine even if not every
-sensor/board is plugged in — missing hardware just logs blank values
-instead of crashing.
-
-HARDWARE SUMMARY
------------------
-3 independent I2C buses on the Pi 4, each an exact copy of your original
-4-board ADS1115 cluster (8 sensors: 4 boards x 2 sensors each).
-I2C5 was chosen over I2C4 because I2C4 sits on GPIO8/9, which conflict
-with SPI0. Enable the extra buses in /boot/firmware/config.txt and
-reboot:
-
-    dtoverlay=i2c3,pins_4_5      # GPIO4=SDA(pin7),  GPIO5=SCL(pin29)   -> /dev/i2c-3
-    dtoverlay=i2c5,pins_12_13    # GPIO12=SDA(pin32), GPIO13=SCL(pin33) -> /dev/i2c-5
-
-(i2c1 on GPIO2/3 is built-in, no overlay needed.)
-
-Each new bus needs its own 5V<->3.3V bi-directional level shifter, same
-as the one in your original diagram.
-
-TIMING NOTE
------------
-Since the 3 I2C buses are independent hardware, this script reads each
-bus in its own thread IN PARALLEL. Each bus has 8 sensors (0.35s settle
-x 2 reads each = 0.7s x 8 = 5.6s), so the whole sample takes ~5.6s
-instead of 24 x 0.7s = 16.8s if done serially — comfortable margin
-inside a 30s sample window.
-
-The original script also re-read and rewrote the entire day's CSV file
-on every loop pass, which gets slower as the file grows. This script
-appends a single row with the standard csv module instead — O(1) per
-write regardless of file size.
-"""
-
+import streamlit as st
+import pandas as pd
+from docx import Document
+from io import BytesIO
 from datetime import datetime
 import os
-import csv
-import time
-import threading
-from collections import defaultdict
+import hashlib
+import matplotlib.pyplot as plt
+from fpdf import FPDF
+import tempfile
+from supabase import create_client
+from streamlit_autorefresh import st_autorefresh
 
-import board
-import busio
-import adafruit_ads1x15.ads1115 as ADS
-from adafruit_ads1x15.analog_in import AnalogIn
+supabase = create_client(
+    st.secrets["SUPABASE_URL"],
+    st.secrets["SUPABASE_KEY"]
+)
 
-# Supabase live push — optional. If the package isn't installed or the
-# network/credentials aren't available, the logger keeps working with
-# CSV logging only; it just skips the live push and warns once.
-try:
-    from supabase import create_client
-    SUPABASE_LIB_AVAILABLE = True
-except ImportError:
-    SUPABASE_LIB_AVAILABLE = False
+# =========================
+# AUTHENTICATION
+# =========================
 
-SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
-SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")
-SUPABASE_ENABLED = True   # set False to disable live push entirely
+SALT = "pv_secure_salt_2026"
 
-# ----------------------------------------------------------------------
-# CONFIG
-# ----------------------------------------------------------------------
+def hash_password(password: str) -> str:
+    return hashlib.sha256((password + SALT).encode()).hexdigest()
 
-DATA_DIR = os.path.join(os.path.expanduser("~"), "Desktop", "bifacial data")
-NUM_SENSORS = 24
-SAMPLE_EVERY_SEC = 30
-SETTLE_SLEEP = 0.35
-IDLE_SLEEP = 0.5
-RETRY_BOARD_EVERY = 20   # re-probe a missing board every N samples
+def check_password(password: str) -> bool:
+    return hash_password(password) == hash_password("admin123")
 
-IRR_SCALE = 240.0
-TEMP_SCALE = 20.0
-TEMP_OFFSET = -30.0
+def login():
+    st.title("🔐 Login")
 
-# ----------------------------------------------------------------------
-# I2C BUSES
-# ----------------------------------------------------------------------
+    col1, col2 = st.columns(2)
 
-BUS_PINS = {
-    "i2c1": (board.SCL, board.SDA),   # GPIO3 / GPIO2  (built-in)
-    "i2c3": (board.D5, board.D4),     # GPIO5 / GPIO4  (dtoverlay=i2c3,pins_4_5)
-    "i2c5": (board.D13, board.D12),   # GPIO13 / GPIO12 (dtoverlay=i2c5,pins_12_13)
-}
+    with col1:
+        st.subheader("Admin Login")
+        password = st.text_input("Enter Admin Password", type="password", key="admin_pass")
 
-# ----------------------------------------------------------------------
-# SENSOR MAP — 8 sensors (4 boards) per bus, 24 total
-# ----------------------------------------------------------------------
+        if st.button("Login as Admin"):
+            if check_password(password):
+                st.session_state.auth = True
+                st.session_state.user_role = "admin"
+                st.success("Admin access granted")
+                st.rerun()
+            else:
+                st.error("Wrong password")
 
-def _entry(bus, addr, irr_pin, temp_pin):
-    return {"bus": bus, "addr": addr, "irr_pin": irr_pin, "temp_pin": temp_pin}
+    with col2:
+        st.subheader("Guest Access")
+        if st.button("Login as Guest"):
+            st.session_state.auth = True
+            st.session_state.user_role = "guest"
+            st.success("Guest access granted")
+            st.rerun()
 
-SENSOR_MAP = {
-    # --- bus i2c1 (GPIO2/3) ---
-    1:  _entry("i2c1", 0x48, 0, 1),
-    2:  _entry("i2c1", 0x48, 2, 3),
-    3:  _entry("i2c1", 0x49, 0, 1),
-    4:  _entry("i2c1", 0x49, 2, 3),
-    5:  _entry("i2c1", 0x4B, 0, 1),
-    6:  _entry("i2c1", 0x4B, 2, 3),
-    7:  _entry("i2c1", 0x4A, 0, 1),
-    8:  _entry("i2c1", 0x4A, 2, 3),
-    # --- bus i2c3 (GPIO4/5) ---
-    9:  _entry("i2c3", 0x48, 0, 1),
-    10: _entry("i2c3", 0x48, 2, 3),
-    11: _entry("i2c3", 0x49, 0, 1),
-    12: _entry("i2c3", 0x49, 2, 3),
-    13: _entry("i2c3", 0x4B, 0, 1),
-    14: _entry("i2c3", 0x4B, 2, 3),
-    15: _entry("i2c3", 0x4A, 0, 1),
-    16: _entry("i2c3", 0x4A, 2, 3),
-    # --- bus i2c5 (GPIO12/13) ---
-    17: _entry("i2c5", 0x48, 0, 1),
-    18: _entry("i2c5", 0x48, 2, 3),
-    19: _entry("i2c5", 0x49, 0, 1),
-    20: _entry("i2c5", 0x49, 2, 3),
-    21: _entry("i2c5", 0x4B, 0, 1),
-    22: _entry("i2c5", 0x4B, 2, 3),
-    23: _entry("i2c5", 0x4A, 0, 1),
-    24: _entry("i2c5", 0x4A, 2, 3),
-}
-SENSOR_MAP = {k: v for k, v in SENSOR_MAP.items() if k <= NUM_SENSORS}
+# =========================
+# PLOTTING FUNCTION
+# =========================
 
-BUS_SENSORS = defaultdict(list)
-for _sid, _cfg in SENSOR_MAP.items():
-    BUS_SENSORS[_cfg["bus"]].append(_sid)
+def fig_to_image_bytes(fig):
+    buf = BytesIO()
+    fig.savefig(buf, format="png", dpi=300, bbox_inches="tight")
+    buf.seek(0)
+    return buf
 
-# ----------------------------------------------------------------------
-# HARDWARE LAYER (I2C / ADS1115) — thread-safe, lazy, self-healing
-# ----------------------------------------------------------------------
+def plot_weather_signals(time, temperatures, irradiances, title="Weather Data"):
+    fig, ax1 = plt.subplots(figsize=(12, 6))
 
-class HardwareManager:
-    def __init__(self):
-        self._i2c_buses = {}
-        self._bus_fail = set()
-        self._boards = {}
-        self._channels = {}
-        self._board_fail_count = {}
-        self._warned = set()
-        self._lock = threading.Lock()   # protects the dicts above only
+    for label, temp_values in temperatures.items():
+        ax1.plot(time, temp_values, label=label)
 
-    def _get_i2c(self, bus_name):
-        with self._lock:
-            if bus_name in self._i2c_buses:
-                return self._i2c_buses[bus_name]
-            if bus_name in self._bus_fail:
-                return None
-            pins = BUS_PINS.get(bus_name)
-            if pins is None:
-                print("WARNING: unknown bus '{}' — check BUS_PINS.".format(bus_name))
-                self._bus_fail.add(bus_name)
-                return None
-            scl, sda = pins
-            try:
-                i2c = busio.I2C(scl, sda)
-                self._i2c_buses[bus_name] = i2c
-                print("Opened I2C bus '{}'".format(bus_name))
-                return i2c
-            except Exception as e:
-                print("WARNING: couldn't open bus '{}' ({}). Check config.txt "
-                      "overlay + reboot. Sensors on this bus will be skipped.".format(bus_name, e))
-                self._bus_fail.add(bus_name)
-                return None
+    ax1.set_xlabel("Time")
+    ax1.set_ylabel("Temperature (°C)")
 
-    def _get_board(self, bus_name, addr):
-        key = (bus_name, addr)
-        with self._lock:
-            if key in self._boards:
-                return self._boards[key]
-            fails = self._board_fail_count.get(key, 0)
-            if fails > 0 and fails < RETRY_BOARD_EVERY:
-                self._board_fail_count[key] = fails + 1
-                return None
+    ax2 = ax1.twinx()
 
-        i2c = self._get_i2c(bus_name)  # acquires lock internally, so call outside
-        if i2c is None:
-            with self._lock:
-                self._board_fail_count[key] = 1
-            return None
+    for label, irr_values in irradiances.items():
+        ax2.plot(time, irr_values, linestyle="--", label=label)
 
-        try:
-            ads = ADS.ADS1115(i2c, address=addr, data_rate=250, gain=2 / 3)
-            with self._lock:
-                self._boards[key] = ads
-                self._board_fail_count[key] = 0
-            print("Found ADS1115 board at {} on bus '{}'".format(hex(addr), bus_name))
-            return ads
-        except Exception as e:
-            with self._lock:
-                if key not in self._warned:
-                    print("WARNING: no ADS1115 found at {} on bus '{}': {}. "
-                          "Will retry every {} samples.".format(hex(addr), bus_name, e, RETRY_BOARD_EVERY))
-                    self._warned.add(key)
-                self._board_fail_count[key] = 1
-            return None
+    ax2.set_ylabel("Irradiance (W/m²)")
 
-    def read_voltage(self, bus_name, addr, pin):
-        chan_key = (bus_name, addr, pin)
-        with self._lock:
-            chan = self._channels.get(chan_key)
+    plt.title(title)
 
-        if chan is None:
-            ads = self._get_board(bus_name, addr)
-            if ads is None:
-                return None
-            try:
-                chan = AnalogIn(ads, [ADS.P0, ADS.P1, ADS.P2, ADS.P3][pin])
-                with self._lock:
-                    self._channels[chan_key] = chan
-            except Exception as e:
-                print("WARNING: couldn't open channel {} on {}: {}".format(pin, hex(addr), e))
-                return None
+    lines1, labels1 = ax1.get_legend_handles_labels()
+    lines2, labels2 = ax2.get_legend_handles_labels()
+    ax1.legend(lines1 + lines2, labels1 + labels2, loc="upper left")
 
-        try:
-            return chan.voltage   # actual I2C transaction — NOT under lock, runs in parallel across buses
-        except Exception as e:
-            print("WARNING: read failed on {} pin {}: {}".format(hex(addr), pin, e))
-            with self._lock:
-                self._boards.pop((bus_name, addr), None)
-                self._channels.pop(chan_key, None)
-            return None
+    fig.tight_layout()
+    return fig
 
-    def tick(self):
-        with self._lock:
-            for key in list(self._board_fail_count.keys()):
-                if key not in self._boards:
-                    self._board_fail_count[key] = self._board_fail_count.get(key, 0) + 1
-                    if self._board_fail_count[key] >= RETRY_BOARD_EVERY:
-                        self._board_fail_count[key] = 0
+# =========================
+# REPORT DATA BUILDER
+# =========================
 
+def build_report_data(df, report_title, observation, fig):
+    """Build uniform report data structure"""
+    start_time = f"{df['Date'].iloc[0]} {df['Time'].iloc[0]}" if "Date" in df.columns and "Time" in df.columns else "N/A"
+    end_time = f"{df['Date'].iloc[-1]} {df['Time'].iloc[-1]}" if "Date" in df.columns and "Time" in df.columns else "N/A"
 
-hw = HardwareManager()
+    metadata = [
+        ("Generated Date", datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
+        ("Total Records", str(df.shape[0])),
+        ("Total Columns", str(df.shape[1])),
+        ("Start Time", start_time),
+        ("End Time", end_time),
+        ("Observation Notes", observation if observation else "")
+    ]
 
-# ----------------------------------------------------------------------
-# SUPABASE LIVE PUSH — fault-tolerant, never blocks/crashes the logger
-# ----------------------------------------------------------------------
+    columns_list = ", ".join(df.columns)
 
-_supabase_client = None
-_supabase_warned = False
+    numeric_df = df.select_dtypes(include="number")
+    numeric_summary = None
 
+    if not numeric_df.empty:
+        numeric_summary = []
+        for col in numeric_df.columns:
+            numeric_summary.append({
+                "Column": col,
+                "Mean": f"{numeric_df[col].mean():.2f}",
+                "Min": f"{numeric_df[col].min():.2f}",
+                "Max": f"{numeric_df[col].max():.2f}"
+            })
 
-def _get_supabase_client():
-    global _supabase_client, _supabase_warned
-    if not SUPABASE_ENABLED or not SUPABASE_LIB_AVAILABLE:
-        return None
-    if _supabase_client is not None:
-        return _supabase_client
-    if not SUPABASE_URL or not SUPABASE_KEY:
-        if not _supabase_warned:
-            print("WARNING: SUPABASE_URL/SUPABASE_KEY not set — live push disabled, CSV logging continues.")
-            _supabase_warned = True
-        return None
+    return {
+        "title": report_title,
+        "metadata": metadata,
+        "columns": columns_list,
+        "numeric_summary": numeric_summary,
+        "figure": fig
+    }
+
+# =========================
+# PREVIEW FUNCTION
+# =========================
+
+def preview_report_content(df, report_title, observation, fig):
+    """Display a preview of what will be in the report"""
+    report_data = build_report_data(df, report_title, observation, fig)
+
+    # Report Title
+    st.markdown(f"# {report_data['title']}")
+
+    # Metadata Table
+    metadata_df = pd.DataFrame(report_data['metadata'], columns=["Field", "Value"])
+    st.dataframe(metadata_df, use_container_width=True, hide_index=True)
+
+    # Column Overview
+    st.markdown("## Column Overview")
+    st.write(report_data['columns'])
+
+    # Numeric Summary
+    st.markdown("## Numeric Summary")
+    if report_data['numeric_summary']:
+        summary_df = pd.DataFrame(report_data['numeric_summary'])
+        st.dataframe(summary_df, use_container_width=True, hide_index=True)
+    else:
+        st.info("No numeric columns found")
+
+    # Weather Graph
+    st.markdown("## Weather Graph")
+    st.pyplot(report_data['figure'])
+
+# =========================
+# WORD REPORT
+# =========================
+
+def generate_word_report(df, report_title, observation, fig):
+    report_data = build_report_data(df, report_title, observation, fig)
+
+    doc = Document()
+    doc.add_heading(report_data['title'], level=1)
+
+    # Metadata Table
+    table = doc.add_table(rows=len(report_data['metadata']), cols=2)
+    table.style = "Table Grid"
+
+    for i, (key, value) in enumerate(report_data['metadata']):
+        table.cell(i, 0).text = key
+        table.cell(i, 1).text = value
+
+    # Column Overview
+    doc.add_heading("Column Overview", level=2)
+    doc.add_paragraph(report_data['columns'])
+
+    # Numeric Summary
+    if report_data['numeric_summary']:
+        doc.add_heading("Numeric Summary", level=2)
+        summary_table = doc.add_table(rows=len(report_data['numeric_summary']) + 1, cols=4)
+        summary_table.style = "Table Grid"
+
+        headers = ["Column", "Mean", "Min", "Max"]
+        for col_idx, header in enumerate(headers):
+            summary_table.cell(0, col_idx).text = header
+
+        for row_idx, row_data in enumerate(report_data['numeric_summary'], start=1):
+            summary_table.cell(row_idx, 0).text = row_data["Column"]
+            summary_table.cell(row_idx, 1).text = row_data["Mean"]
+            summary_table.cell(row_idx, 2).text = row_data["Min"]
+            summary_table.cell(row_idx, 3).text = row_data["Max"]
+
+    # Weather Graph
+    doc.add_heading("Weather Graph", level=2)
+    img_stream = fig_to_image_bytes(report_data['figure'])
+    doc.add_picture(img_stream)
+
+    buffer = BytesIO()
+    doc.save(buffer)
+    buffer.seek(0)
+    return buffer
+
+# =========================
+# PDF REPORT
+# =========================
+
+def generate_pdf_report(df, report_title, observation, fig):
+    report_data = build_report_data(df, report_title, observation, fig)
+
+    pdf = FPDF()
+    pdf.add_page()
+
+    # Title
+    pdf.set_font("Helvetica", "B", 16)
+    pdf.cell(0, 10, report_data['title'], new_x="LMARGIN", new_y="NEXT")
+
+    # Metadata Table
+    pdf.ln(5)
+    pdf.set_font("Helvetica", "B", 10)
+    pdf.cell(50, 8, "Field", border=1)
+    pdf.cell(130, 8, "Value", border=1)
+    pdf.ln()
+
+    pdf.set_font("Helvetica", size=10)
+    for key, value in report_data['metadata']:
+        pdf.cell(50, 8, key, border=1)
+        pdf.cell(130, 8, str(value), border=1)
+        pdf.ln()
+
+    # Column Overview
+    pdf.ln(5)
+    pdf.set_font("Helvetica", "B", 13)
+    pdf.cell(0, 10, "Column Overview", new_x="LMARGIN", new_y="NEXT")
+
+    pdf.set_font("Helvetica", size=10)
+    pdf.multi_cell(0, 8, report_data['columns'])
+
+    # Numeric Summary
+    if report_data['numeric_summary']:
+        pdf.ln(5)
+        pdf.set_font("Helvetica", "B", 13)
+        pdf.cell(0, 10, "Numeric Summary", new_x="LMARGIN", new_y="NEXT")
+
+        pdf.set_font("Helvetica", "B", 10)
+        headers = ["Column", "Mean", "Min", "Max"]
+        for header in headers:
+            pdf.cell(45, 8, header, border=1)
+        pdf.ln()
+
+        pdf.set_font("Helvetica", size=10)
+        for row_data in report_data['numeric_summary']:
+            pdf.cell(45, 8, str(row_data["Column"]), border=1)
+            pdf.cell(45, 8, row_data["Mean"], border=1)
+            pdf.cell(45, 8, row_data["Min"], border=1)
+            pdf.cell(45, 8, row_data["Max"], border=1)
+            pdf.ln()
+
+    # Weather Graph
+    pdf.ln(5)
+    pdf.set_font("Helvetica", "B", 13)
+    pdf.cell(0, 10, "Weather Graph", new_x="LMARGIN", new_y="NEXT")
+
+    img_stream = fig_to_image_bytes(report_data['figure'])
+
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp:
+        tmp.write(img_stream.getvalue())
+        temp_image_path = tmp.name
+
+    pdf.image(temp_image_path, w=180)
+
+    os.unlink(temp_image_path)
+
+    return bytes(pdf.output())
+
+# =========================
+# REMOTE FORCE-LOG SETTING (pi_settings table, id=1)
+# =========================
+
+def get_force_log_status():
+    """Best-effort read of the current force_log_below_zero flag.
+    Returns False (normal/safe behavior) if the table/row doesn't
+    exist yet or the request fails, so a Supabase hiccup never shows
+    a false 'currently forcing' state."""
     try:
-        _supabase_client = create_client(SUPABASE_URL, SUPABASE_KEY)
-        print("Connected to Supabase for live push.")
-        return _supabase_client
-    except Exception as e:
-        if not _supabase_warned:
-            print("WARNING: couldn't connect to Supabase ({}). "
-                  "Live push disabled, CSV logging continues.".format(e))
-            _supabase_warned = True
-        return None
+        res = (
+            supabase.table("pi_settings")
+            .select("force_log_below_zero")
+            .eq("id", 1)
+            .execute()
+        )
+        if res.data:
+            return bool(res.data[0].get("force_log_below_zero", False))
+    except Exception:
+        pass
+    return False
 
 
-def push_to_supabase(date_str, time_str, readings_dict):
-    """Best-effort push of one sample to Supabase. Any failure (no
-    network, bad credentials, table missing, etc.) just logs a warning —
-    CSV logging is never affected."""
-    client = _get_supabase_client()
-    if client is None:
-        return
+def set_force_log_status(value: bool):
+    """Best-effort write of the force_log_below_zero flag. Returns
+    True on success so the caller can show an error if it didn't
+    actually go through."""
     try:
-        client.table("sensor_readings").insert({
-            "date": date_str,
-            "time": time_str,
-            "readings": readings_dict,
-        }).execute()
-    except Exception as e:
-        print("WARNING: Supabase push failed: {}".format(e))
+        supabase.table("pi_settings").update(
+            {"force_log_below_zero": value}
+        ).eq("id", 1).execute()
+        return True
+    except Exception:
+        return False
 
-# ----------------------------------------------------------------------
-# CSV FILE HELPERS — append-only, O(1) per write
-# ----------------------------------------------------------------------
+# =========================
+# MAIN APP
+# =========================
 
-def build_header():
-    header = ["Date", "Time"]
-    for i in range(1, NUM_SENSORS + 1):
-        header += ["Irr_{}".format(i), "Temp_{}".format(i)]
-    return header
+if "auth" not in st.session_state:
+    st.session_state.auth = False
+    st.session_state.user_role = None
 
+if not st.session_state.auth:
+    login()
+    st.stop()
 
-def ensure_dirs(year, month):
-    month_dir = os.path.join(DATA_DIR, year, month)
-    os.makedirs(month_dir, exist_ok=True)
-    return month_dir
+st.sidebar.subheader("Session")
+st.sidebar.write(f"Role: {st.session_state.user_role.capitalize()}")
 
+if st.sidebar.button("🚪 Logout"):
+    st.session_state.auth = False
+    st.session_state.user_role = None
+    st.rerun()
 
-def ensure_file_ready(path, header):
-    """Creates the file with a header row if it doesn't exist. If it
-    exists but was created with a different set of sensor columns (e.g.
-    you changed NUM_SENSORS), migrates it once using only the standard
-    csv module — this only runs at most once per file, not per sample."""
-    if not os.path.isfile(path):
-        with open(path, "w", newline="") as f:
-            csv.writer(f).writerow(header)
-        return
+st.title("📊 Bifacial PV Data Logging System")
 
-    with open(path, "r", newline="") as f:
-        reader = csv.DictReader(f)
-        existing_header = reader.fieldnames
-        if existing_header == header:
-            return
-        rows = list(reader)
+file = st.file_uploader("Upload CSV", type=["csv"])
 
-    with open(path, "w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=header)
-        writer.writeheader()
-        for row in rows:
-            writer.writerow({col: row.get(col, "") for col in header})
+report_title = st.text_input("Report Title", "Bifacial PV Performance Report")
+observation = st.text_area("Observation Notes")
 
+if file is not None:
 
-def append_row(path, row):
-    with open(path, "a", newline="") as f:
-        csv.writer(f).writerow(row)
+    df = pd.read_csv(file)
 
-# ----------------------------------------------------------------------
-# SENSOR READS — parallel across buses
-# ----------------------------------------------------------------------
+    st.subheader("📊 Data Preview")
+    st.dataframe(df.head(100))
 
-def read_sensor(sensor_id):
-    cfg = SENSOR_MAP.get(sensor_id)
-    if cfg is None:
-        return None, None
-    irr_v = hw.read_voltage(cfg["bus"], cfg["addr"], cfg["irr_pin"])
-    time.sleep(SETTLE_SLEEP)
-    temp_v = hw.read_voltage(cfg["bus"], cfg["addr"], cfg["temp_pin"])
-    time.sleep(SETTLE_SLEEP)
-    irr = round(irr_v * IRR_SCALE, 2) if irr_v is not None else None
-    temp = round(temp_v * TEMP_SCALE + TEMP_OFFSET, 1) if temp_v is not None else None
-    return irr, temp
+    st.subheader("📌 Dataset Info")
+    st.write(f"Rows: {df.shape[0]}")
+    st.write(f"Columns: {df.shape[1]}")
 
+    time = df["Time"] if "Time" in df.columns else df.index
 
-def _read_bus_worker(bus_name, sensor_ids, results):
-    for sid in sensor_ids:
-        results[sid] = read_sensor(sid)
+    numeric_cols = df.select_dtypes(include="number").columns.tolist()
 
+    st.subheader("📈 Graph Configuration")
 
-def sample_all_sensors():
-    """Reads every sensor, one thread per I2C bus running in parallel."""
-    results = {}
-    threads = []
-    for bus_name, sensor_ids in BUS_SENSORS.items():
-        t = threading.Thread(target=_read_bus_worker, args=(bus_name, sensor_ids, results))
-        t.start()
-        threads.append(t)
-    for t in threads:
-        t.join()
-    hw.tick()
-    return results
+    selected_temps = st.multiselect(
+        "Select Temperature Columns",
+        numeric_cols,
+        default=[c for c in numeric_cols if "temp" in c.lower()]
+    )
 
-# ----------------------------------------------------------------------
-# MAIN LOOP
-# ----------------------------------------------------------------------
+    selected_irradiance = st.multiselect(
+        "Select Irradiance Columns",
+        numeric_cols,
+        default=[c for c in numeric_cols if "irr" in c.lower()]
+    )
 
-def main():
-    header = build_header()
-    last_sample_second = None
-    current_path = None
+    temperatures = {col: df[col].tolist() for col in selected_temps}
+    irradiances = {col: df[col].tolist() for col in selected_irradiance}
 
-    while True:
-        sec = int(time.strftime("%S"))
-        if sec % SAMPLE_EVERY_SEC == 0 and sec != last_sample_second:
-            last_sample_second = sec
-            start = time.monotonic()
+    if selected_temps or selected_irradiance:
+        fig = plot_weather_signals(time, temperatures, irradiances)
+        st.pyplot(fig)
 
-            now = datetime.now()
-            year, month = str(now.year), str(now.month)
-            month_dir = ensure_dirs(year, month)
-            filename = "Bifacial_ {}.csv".format(now.date())
-            path = os.path.join(month_dir, filename)
+        st.subheader("📄 Generate Reports")
 
-            if path != current_path:
-                ensure_file_ready(path, header)
-                current_path = path
+        if st.button("👁️ Preview Report"):
+            st.session_state.show_preview = True
 
-            results = sample_all_sensors()
+        if st.session_state.get("show_preview"):
+            with st.expander("📋 Report Preview", expanded=True):
+                preview_report_content(df, report_title, observation, fig)
 
-            row = [str(now.date()), str(now.time())]
-            for sid in range(1, NUM_SENSORS + 1):
-                irr, temp = results.get(sid, (None, None))
-                row += [irr, temp]
+            st.divider()
+            col1, col2 = st.columns(2)
 
-            append_row(path, row)
+            with col1:
+                report = generate_word_report(df, report_title, observation, fig)
+                st.download_button(
+                    label="⬇️ Download Word Report",
+                    data=report,
+                    file_name="PV_Report.docx",
+                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                )
 
-            readings_dict = {}
-            for sid in range(1, NUM_SENSORS + 1):
-                irr, temp = results.get(sid, (None, None))
-                readings_dict["Irr_{}".format(sid)] = irr
-                readings_dict["Temp_{}".format(sid)] = temp
-            push_to_supabase(str(now.date()), str(now.time()), readings_dict)
+            with col2:
+                report = generate_pdf_report(df, report_title, observation, fig)
+                st.download_button(
+                    label="⬇️ Download PDF Report",
+                    data=report,
+                    file_name="PV_Report.pdf",
+                    mime="application/pdf"
+                )
 
-            present = [sid for sid, (i, t) in results.items() if i is not None or t is not None]
-            elapsed = time.monotonic() - start
-            print("[{}] sampled {}/{} sensors in {:.1f}s: {}".format(
-                row[1], len(present), NUM_SENSORS, elapsed, present))
+    if st.button("Test Supabase"):
+        supabase.table("pi_commands").update({"command": "hello"}).eq("id", 1).execute()
+        st.success("Database updated!")
 
-        time.sleep(IDLE_SLEEP)
+if st.session_state.user_role == "admin":
+    st.divider()
+    st.subheader("🔴 Admin Controls")
 
+    if st.button("🔄 Reboot Raspberry Pi"):
 
-if __name__ == "__main__":
-    main()
+        supabase.table("pi_commands") \
+            .update({"command": "reboot"}) \
+            .eq("id", 1) \
+            .execute()
+
+        st.success("Reboot command sent.")
+
+    if st.button("⚫ Shutdown Raspberry Pi"):
+
+        supabase.table("pi_commands") \
+            .update({"command": "shutdown"}) \
+            .eq("id", 1) \
+            .execute()
+        st.success("Shutdown command sent.")
+
+    # -------------------------------------------------
+    # FORCE LOGGING BELOW 0°C
+    # -------------------------------------------------
+    st.divider()
+    st.subheader("🌡️ Force Logging Below 0°C")
+
+    force_log_on = get_force_log_status()
+
+    status_col, button_col = st.columns([1, 2])
+
+    with status_col:
+        if force_log_on:
+            st.markdown(
+                "<div style='display:flex;align-items:center;gap:8px;'>"
+                "<div style='width:16px;height:16px;border-radius:50%;"
+                "background:#2ecc71;box-shadow:0 0 8px #2ecc71;'></div>"
+                "<span><b>FORCE LOG: ON</b></span></div>",
+                unsafe_allow_html=True,
+            )
+        else:
+            st.markdown(
+                "<div style='display:flex;align-items:center;gap:8px;'>"
+                "<div style='width:16px;height:16px;border-radius:50%;"
+                "background:#e74c3c;box-shadow:0 0 8px #e74c3c;'></div>"
+                "<span><b>FORCE LOG: OFF</b></span></div>",
+                unsafe_allow_html=True,
+            )
+
+    with button_col:
+        if force_log_on:
+            if st.button("⏹️ Stop Force Logging (resume sub-zero cutoff)"):
+                if set_force_log_status(False):
+                    st.success("Force logging disabled — sub-zero readings will be discarded again.")
+                    st.rerun()
+                else:
+                    st.error("Couldn't reach Supabase — try again.")
+        else:
+            if st.button("▶️ Force Logging (ignore sub-zero cutoff)"):
+                if set_force_log_status(True):
+                    st.success("Force logging enabled — the Pi will log sub-zero readings as-is.")
+                    st.rerun()
+                else:
+                    st.error("Couldn't reach Supabase — try again.")
+
+    st.caption(
+        "When ON, the Pi keeps logging every sensor's temperature even if it "
+        "reads below 0°C, instead of discarding it as invalid. The Pi only "
+        "checks this once a minute, so it can take up to ~60s to take effect."
+    )
+else:
+    st.divider()
+    st.info("ℹ️ Admin controls are not available in guest mode.")
+
+# =========================
+# LIVE SENSOR DATA
+# =========================
+
+st.divider()
+st.subheader("Live Sensor Data")
+
+refresh_seconds = st.slider("Auto-refresh interval (seconds)", 5, 60, 15)
+st_autorefresh(interval=refresh_seconds * 1000, key="live_refresh")
+
+@st.cache_data(ttl=5)
+def fetch_latest_readings(limit=50):
+    response = (
+        supabase.table("sensor_readings")
+        .select("*")
+        .order("created_at", desc=True)
+        .limit(limit)
+        .execute()
+    )
+    rows = response.data
+    if not rows:
+        return pd.DataFrame()
+
+    # flatten the jsonb "readings" column into normal columns
+    flat_rows = []
+    for r in rows:
+        flat = {"created_at": r["created_at"], "date": r["date"], "time": r["time"]}
+        flat.update(r["readings"] or {})
+        flat_rows.append(flat)
+
+    df_live = pd.DataFrame(flat_rows)
+    df_live = df_live.sort_values("created_at")  # oldest -> newest for plotting
+    return df_live
+
+df_live = fetch_latest_readings()
+
+if df_live.empty:
+    st.info("No live data yet — waiting for the Pi to push a sample.")
+else:
+    latest = df_live.iloc[-1]
+    st.caption(f"Last update: {latest['date']} {latest['time']}")
+
+    irr_cols = [c for c in df_live.columns if c.startswith("Irr_")]
+    temp_cols = [c for c in df_live.columns if c.startswith("Temp_")]
+
+    # quick "latest values" snapshot
+    cols = st.columns(4)
+    for i, col in enumerate(irr_cols[:4]):
+        val = latest[col]
+        cols[i].metric(col, f"{val:.1f} W/m²" if val is not None else "—")
+
+    # live trend chart — reuse your existing plotting logic if you prefer
+    selected_live_irr = st.multiselect(
+        "Irradiance sensors to plot (live)", irr_cols, default=irr_cols[:1]
+    )
+    if selected_live_irr:
+        st.line_chart(df_live.set_index("created_at")[selected_live_irr])
+
+    with st.expander("Raw live data table"):
+        st.dataframe(df_live, use_container_width=True, hide_index=True)
