@@ -547,3 +547,75 @@ else:
 
     with st.expander("Raw live data table"):
         st.dataframe(df_live, use_container_width=True, hide_index=True)
+
+# =========================
+# LIVE PANEL METER DATA (DCM3366, RS485 bus, up to 8 meters)
+# =========================
+
+st.divider()
+st.subheader("Live Panel Meter Data")
+
+@st.cache_data(ttl=5)
+def fetch_latest_panel_readings(limit=200):
+    response = (
+        supabase.table("panel_readings")
+        .select("*")
+        .order("created_at", desc=True)
+        .limit(limit)
+        .execute()
+    )
+    rows = response.data
+    if not rows:
+        return pd.DataFrame()
+
+    df_panel = pd.DataFrame(rows)
+    df_panel = df_panel.sort_values("created_at")  # oldest -> newest for plotting
+    return df_panel
+
+df_panel = fetch_latest_panel_readings()
+
+if df_panel.empty:
+    st.info("No live panel meter data yet — waiting for the mini PC to push a sample.")
+else:
+    # most recent reading per meter (device_id)
+    latest_per_device = (
+        df_panel.sort_values("created_at").groupby("device_id").tail(1).sort_values("device_id")
+    )
+    latest_overall = df_panel.iloc[-1]
+    st.caption(f"Last update: {latest_overall['created_at']}")
+
+    for _, row in latest_per_device.iterrows():
+        device_label = f"Meter {int(row['device_id'])}"
+        has_error = row.get("error") not in (None, "No error")
+
+        status_dot = "🔴" if has_error else "🟢"
+        cols = st.columns(5)
+        cols[0].markdown(f"**{status_dot} {device_label}**")
+        cols[1].metric("Voltage", f"{row['voltage_v']:.1f} V" if row["voltage_v"] is not None else "—")
+        cols[2].metric("Current", f"{row['current_a']:.2f} A" if row["current_a"] is not None else "—")
+        cols[3].metric("Power", f"{row['active_power_kw']:.3f} kW" if row["active_power_kw"] is not None else "—")
+        cols[4].metric("Energy", f"{row['forward_energy_kwh']:.1f} kWh" if row["forward_energy_kwh"] is not None else "—")
+
+        if has_error:
+            st.caption(f"⚠️ {device_label}: {row.get('error')}")
+
+    st.markdown("### Trend")
+    device_ids = sorted(df_panel["device_id"].dropna().unique().tolist())
+    selected_devices = st.multiselect(
+        "Meters to plot", device_ids, default=device_ids[:1], format_func=lambda d: f"Meter {int(d)}"
+    )
+    metric_choice = st.radio(
+        "Metric", ["voltage_v", "current_a", "active_power_kw"],
+        format_func=lambda m: {"voltage_v": "Voltage (V)", "current_a": "Current (A)", "active_power_kw": "Power (kW)"}[m],
+        horizontal=True,
+    )
+
+    if selected_devices:
+        pivot = df_panel[df_panel["device_id"].isin(selected_devices)].pivot_table(
+            index="created_at", columns="device_id", values=metric_choice
+        )
+        pivot.columns = [f"Meter {int(c)}" for c in pivot.columns]
+        st.line_chart(pivot)
+
+    with st.expander("Raw panel meter data table"):
+        st.dataframe(df_panel, use_container_width=True, hide_index=True)
