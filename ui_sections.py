@@ -284,32 +284,44 @@ def generate_pdf_report(df, report_title, observation, fig):
 # SUPABASE-DRIVEN SETTINGS & FETCHERS
 # =========================
 
-def get_force_log_status():
-    """Best-effort read of the current force_log_below_zero flag.
-    Returns False (normal/safe behavior) if the table/row doesn't
-    exist yet or the request fails, so a Supabase hiccup never shows
-    a false 'currently forcing' state."""
+NUM_SENSORS = 24
+
+
+def get_forced_sensors() -> set:
+    """Best-effort read of which sensor IDs currently have the
+    sub-zero cutoff overridden (pi_settings.force_log_sensors, a
+    jsonb array of ints). Returns an empty set (i.e. nothing forced —
+    normal/safe behavior) if the column/row doesn't exist yet or the
+    request fails, so a Supabase hiccup never shows a false 'currently
+    forcing' state. Not cached — needs to reflect toggles immediately."""
     try:
         res = (
             supabase.table("pi_settings")
-            .select("force_log_below_zero")
+            .select("force_log_sensors")
             .eq("id", 1)
             .execute()
         )
         if res.data:
-            return bool(res.data[0].get("force_log_below_zero", False))
+            raw = res.data[0].get("force_log_sensors") or []
+            return {int(s) for s in raw}
     except Exception:
         pass
-    return False
+    return set()
 
 
-def set_force_log_status(value: bool):
-    """Best-effort write of the force_log_below_zero flag. Returns
-    True on success so the caller can show an error if it didn't
-    actually go through."""
+def set_sensor_force(sensor_id: int, forced: bool) -> bool:
+    """Best-effort toggle of a single sensor's force-log override.
+    Reads the current array, adds/removes sensor_id, writes the full
+    array back. Returns True on success so the caller can show an
+    error if it didn't actually go through."""
     try:
+        current = get_forced_sensors()
+        if forced:
+            current.add(sensor_id)
+        else:
+            current.discard(sensor_id)
         supabase.table("pi_settings").update(
-            {"force_log_below_zero": value}
+            {"force_log_sensors": sorted(current)}
         ).eq("id", 1).execute()
         return True
     except Exception:
