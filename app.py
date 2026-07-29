@@ -548,6 +548,54 @@ else:
     with st.expander("Raw live data table"):
         st.dataframe(df_live, use_container_width=True, hide_index=True)
 
+    # -------------------------------------------------
+    # SENSORS CURRENTLY BELOW 0°C (not logging)
+    # -------------------------------------------------
+    st.markdown("### 🌡️ Sensors Below 0°C")
+
+    @st.cache_data(ttl=5)
+    def fetch_recent_alerts(limit=200):
+        response = (
+            supabase.table("sensor_alerts")
+            .select("*")
+            .order("created_at", desc=True)
+            .limit(limit)
+            .execute()
+        )
+        rows = response.data
+        if not rows:
+            return pd.DataFrame()
+        df = pd.DataFrame(rows)
+        df["created_at"] = pd.to_datetime(df["created_at"])
+        return df
+
+    df_alerts = fetch_recent_alerts()
+
+    if df_alerts.empty:
+        st.success("No sub-zero alerts recorded — all sensors logging normally.")
+    else:
+        # a sensor's most recent alert — if it's recent (within ~2.5x the
+        # Pi's once-a-minute check), treat it as still currently invalid
+        latest_per_sensor = df_alerts.sort_values("created_at").groupby("sensor_id").tail(1)
+        now_utc = pd.Timestamp.now(tz="UTC")
+        currently_invalid = latest_per_sensor[
+            now_utc - latest_per_sensor["created_at"] < pd.Timedelta(seconds=150)
+        ]
+
+        if currently_invalid.empty:
+            st.success("No sensors currently below 0°C.")
+        else:
+            st.error(f"{len(currently_invalid)} sensor(s) currently below 0°C and not logging:")
+            for _, row in currently_invalid.sort_values("sensor_id").iterrows():
+                st.markdown(
+                    f"🔴 **Sensor {int(row['sensor_id'])}** — {row['temp_c']}°C "
+                    f"@ {row['created_at'].strftime('%H:%M:%S')} "
+                    f"(bus {row['bus']}, addr {row['address']})"
+                )
+
+        with st.expander("Recent alert history"):
+            st.dataframe(df_alerts, use_container_width=True, hide_index=True)
+
 # =========================
 # LIVE PANEL METER DATA (DCM3366, RS485 bus, up to 8 meters)
 # =========================
