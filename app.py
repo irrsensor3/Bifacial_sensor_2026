@@ -10,8 +10,9 @@ from ui_sections import (
     preview_report_content,
     generate_word_report,
     generate_pdf_report,
-    get_force_log_status,
-    set_force_log_status,
+    get_forced_sensors,
+    set_sensor_force,
+    NUM_SENSORS,
     fetch_latest_readings,
     fetch_recent_alerts,
     fetch_latest_panel_readings,
@@ -130,53 +131,41 @@ if st.session_state.user_role == "admin":
         supabase.table("pi_commands").update({"command": "shutdown"}).eq("id", 1).execute()
         st.success("Shutdown command sent.")
 
-    # Force logging
+    # -------------------------------------------------
+    # FORCE LOGGING BELOW 0°C — per sensor (1-24)
+    # -------------------------------------------------
     st.divider()
     st.subheader("🌡️ Force Logging Below 0°C")
-
-    force_log_on = get_force_log_status()
-
-    status_col, button_col = st.columns([1, 2])
-
-    with status_col:
-        if force_log_on:
-            st.markdown(
-                "<div style='display:flex;align-items:center;gap:8px;'>"
-                "<div style='width:16px;height:16px;border-radius:50%;"
-                "background:#2ecc71;box-shadow:0 0 8px #2ecc71;'></div>"
-                "<span><b>FORCE LOG: ON</b></span></div>",
-                unsafe_allow_html=True,
-            )
-        else:
-            st.markdown(
-                "<div style='display:flex;align-items:center;gap:8px;'>"
-                "<div style='width:16px;height:16px;border-radius:50%;"
-                "background:#e74c3c;box-shadow:0 0 8px #e74c3c;'></div>"
-                "<span><b>FORCE LOG: OFF</b></span></div>",
-                unsafe_allow_html=True,
-            )
-
-    with button_col:
-        if force_log_on:
-            if st.button("⏹️ Stop Force Logging (resume sub-zero cutoff)"):
-                if set_force_log_status(False):
-                    st.success("Force logging disabled — sub-zero readings will be discarded again.")
-                    st.rerun()
-                else:
-                    st.error("Couldn't reach Supabase — try again.")
-        else:
-            if st.button("▶️ Force Logging (ignore sub-zero cutoff)"):
-                if set_force_log_status(True):
-                    st.success("Force logging enabled — the Pi will log sub-zero readings as-is.")
-                    st.rerun()
-                else:
-                    st.error("Couldn't reach Supabase — try again.")
-
     st.caption(
-        "When ON, the Pi keeps logging every sensor's temperature even if it "
-        "reads below 0°C, instead of discarding it as invalid. The Pi only "
-        "checks this once a minute, so it can take up to ~60s to take effect."
+        "Toggle individual sensors to keep logging their temperature even if "
+        "it reads below 0°C, instead of discarding it as invalid. Green = "
+        "forced ON for that sensor. The Pi only checks this once a minute, "
+        "so a toggle can take up to ~60s to take effect."
     )
+
+    forced_sensors = get_forced_sensors()
+
+    # 6 columns x 4 rows = 24 sensor toggle buttons
+    SENSORS_PER_ROW = 6
+    for row_start in range(1, NUM_SENSORS + 1, SENSORS_PER_ROW):
+        row_ids = range(row_start, min(row_start + SENSORS_PER_ROW, NUM_SENSORS + 1))
+        cols = st.columns(SENSORS_PER_ROW)
+        for col, sid in zip(cols, row_ids):
+            is_forced = sid in forced_sensors
+            label = f"🟢 {sid}" if is_forced else f"🔴 {sid}"
+            with col:
+                if st.button(label, key=f"force_btn_{sid}", use_container_width=True):
+                    if set_sensor_force(sid, not is_forced):
+                        st.rerun()
+                    else:
+                        st.error(f"Couldn't reach Supabase — sensor {sid} not updated.")
+
+    if forced_sensors:
+        st.caption(
+            "Currently forced: " + ", ".join(str(s) for s in sorted(forced_sensors))
+        )
+    else:
+        st.caption("No sensors currently forced — sub-zero cutoff applies to all.")
 else:
     st.divider()
     st.info("ℹ️ Admin controls are not available in guest mode.")
