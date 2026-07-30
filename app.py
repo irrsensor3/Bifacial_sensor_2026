@@ -1,9 +1,9 @@
 import streamlit as st
 
 from ui_sections import login
-from Data_and_Reports import render as render_data_reports
-from Live_Monitoring import render as render_live_monitoring
-from Admin_Controls import render as render_admin_controls
+from Data_and_Reports import render_data_reports
+from Live_Monitoring import render_live_monitoring
+from Admin_Controls import render_admin_controls
 
 st.set_page_config(
     page_title="Bifacial PV Data Logging System",
