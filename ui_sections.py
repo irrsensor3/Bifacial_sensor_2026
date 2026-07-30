@@ -61,15 +61,13 @@ def login():
 
 def require_login(role: str | None = None):
     """Page guard for the multipage app. Call this at the top of every
-    page in pages/. If the user hasn't logged in (via the main app.py
-    login page), shows a message with a link back and stops the page
-    from rendering further. If `role` is given (e.g. "admin"), also
-    requires that exact role and stops with an info message otherwise
-    — mirrors the old inline "Admin controls are not available in
-    guest mode" behavior, just reusable across pages."""
+    page in app_pages/. app.py already gates access to st.navigation
+    behind login (and hides the admin page from non-admins), so this
+    is mainly a safety net for direct reruns. If `role` is given (e.g.
+    "admin"), also requires that exact role and stops with an info
+    message otherwise."""
     if not st.session_state.get("auth"):
-        st.warning("Please log in from the main page first.")
-        st.page_link("app.py", label="🔐 Go to Login", icon="🔐")
+        st.warning("Please log in first.")
         st.stop()
 
     if role is not None and st.session_state.get("user_role") != role:
