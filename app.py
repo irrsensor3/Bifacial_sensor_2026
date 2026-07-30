@@ -17,6 +17,7 @@ from ui_sections import (
     fetch_recent_alerts,
     fetch_latest_panel_readings,
 )
+from drive_fetch import list_available_csvs, download_csv_as_df, format_file_label
 
 # -------------------------
 # Authentication / session
@@ -40,16 +41,52 @@ if st.sidebar.button("🚪 Logout"):
 st.title("📊 Bifacial PV Data Logging System")
 
 # -------------------------
-# File upload / report flow
+# Report source: pick a CSV from Google Drive
 # -------------------------
-file = st.file_uploader("Upload CSV", type=["csv"])
+st.subheader("📁 Select Data Source (Google Drive)")
+
+available_files = list_available_csvs()
+
+df = None
+
+if not available_files:
+    st.warning(
+        "Couldn't find any CSVs in Drive — check that the "
+        "'bifacial-data' folder is shared with the service account, "
+        "and that rclone has synced at least one file."
+    )
+    if st.session_state.get("_drive_list_error"):
+        with st.expander("Error details"):
+            st.code(st.session_state["_drive_list_error"])
+else:
+    file_labels = [format_file_label(f) for f in available_files]
+    selected_idx = st.selectbox(
+        "CSV file (most recent first)",
+        options=range(len(available_files)),
+        format_func=lambda i: file_labels[i],
+        index=0,  # defaults to the newest file
+    )
+    selected_file = available_files[selected_idx]
+
+    if st.button("📥 Load selected file"):
+        try:
+            df = download_csv_as_df(selected_file["id"])
+            st.session_state["_loaded_df"] = df
+            st.session_state["_loaded_filename"] = selected_file["name"]
+            st.success(f"Loaded {selected_file['name']} ({df.shape[0]} rows)")
+        except Exception as e:
+            st.error(f"Couldn't download that file: {e}")
+
+    # keep the loaded dataframe around across reruns (e.g. when
+    # toggling widgets below) until a different file is explicitly loaded
+    if df is None and "_loaded_df" in st.session_state:
+        df = st.session_state["_loaded_df"]
+        st.caption(f"Currently loaded: {st.session_state.get('_loaded_filename', '')}")
 
 report_title = st.text_input("Report Title", "Bifacial PV Performance Report")
 observation = st.text_area("Observation Notes")
 
-if file is not None:
-    df = pd.read_csv(file)
-
+if df is not None:
     st.subheader("📊 Data Preview")
     st.dataframe(df.head(100))
 
