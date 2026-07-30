@@ -28,17 +28,19 @@ if st.sidebar.button("🚪 Logout"):
     st.rerun()
 
 # -------------------------
-# Landing page
+# Pages (built in code, not from filenames — avoids the emoji/
+# filename matching bug in st.page_link). Admin Controls only shows
+# up in the sidebar at all when logged in as admin.
 # -------------------------
-st.title("📊 Bifacial PV Data Logging System")
-st.write("Pick a page from the sidebar, or jump straight there:")
-
-st.page_link("pages/1_📁_Data_and_Reports.py", label="Data & Reports", icon="📁")
-st.caption("Load a CSV from Google Drive, preview it, and generate Word/PDF reports.")
-
-st.page_link("pages/2_📡_Live_Monitoring.py", label="Live Monitoring", icon="📡")
-st.caption("Live irradiance readings, sub-zero temperature alerts, and panel meter data.")
+pages = [
+    st.Page("app_pages/data_reports.py", title="Data & Reports", icon="📁"),
+    st.Page("app_pages/live_monitoring.py", title="Live Monitoring", icon="📡"),
+]
 
 if st.session_state.user_role == "admin":
-    st.page_link("pages/3_🛠️_Admin_Controls.py", label="Admin Controls", icon="🛠️")
-    st.caption("Reboot/shutdown the Pi, force-log sensors below 0°C, and diagnostics.")
+    pages.append(
+        st.Page("app_pages/admin_controls.py", title="Admin Controls", icon="🛠️")
+    )
+
+nav = st.navigation(pages)
+nav.run()
