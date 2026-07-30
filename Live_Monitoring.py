@@ -43,8 +43,26 @@ def render_live_monitoring():
             val = latest[col]
             cols[i].metric(col, f"{val:.1f} W/m²" if val is not None else "—")
 
+        if "selected_live_irr" not in st.session_state:
+            st.session_state.selected_live_irr = irr_cols[:1]
+        else:
+            st.session_state.selected_live_irr = [c for c in st.session_state.selected_live_irr if c in irr_cols]
+
+        irr_label_col, irr_all_col, irr_none_col = st.columns([4, 1, 1])
+        with irr_label_col:
+            st.caption("Irradiance sensors to plot (live)")
+        with irr_all_col:
+            if st.button("Select all", key="live_irr_select_all", use_container_width=True):
+                st.session_state.selected_live_irr = irr_cols
+        with irr_none_col:
+            if st.button("Remove all", key="live_irr_remove_all", use_container_width=True):
+                st.session_state.selected_live_irr = []
+
         selected_live_irr = st.multiselect(
-            "Irradiance sensors to plot (live)", irr_cols, default=irr_cols[:1]
+            "Irradiance sensors to plot (live)",
+            irr_cols,
+            key="selected_live_irr",
+            label_visibility="collapsed",
         )
         if selected_live_irr:
             st.line_chart(df_live.set_index("created_at")[selected_live_irr])
@@ -114,8 +132,27 @@ def render_live_monitoring():
 
         st.markdown("### Trend")
         device_ids = sorted(df_panel["device_id"].dropna().unique().tolist())
+        if "selected_devices" not in st.session_state:
+            st.session_state.selected_devices = device_ids[:1]
+        else:
+            st.session_state.selected_devices = [d for d in st.session_state.selected_devices if d in device_ids]
+
+        dev_label_col, dev_all_col, dev_none_col = st.columns([4, 1, 1])
+        with dev_label_col:
+            st.caption("Meters to plot")
+        with dev_all_col:
+            if st.button("Select all", key="devices_select_all", use_container_width=True):
+                st.session_state.selected_devices = device_ids
+        with dev_none_col:
+            if st.button("Remove all", key="devices_remove_all", use_container_width=True):
+                st.session_state.selected_devices = []
+
         selected_devices = st.multiselect(
-            "Meters to plot", device_ids, default=device_ids[:1], format_func=lambda d: f"Meter {int(d)}"
+            "Meters to plot",
+            device_ids,
+            key="selected_devices",
+            format_func=lambda d: f"Meter {int(d)}",
+            label_visibility="collapsed",
         )
         metric_choice = st.radio(
             "Metric", ["voltage_v", "current_a", "active_power_kw"],
