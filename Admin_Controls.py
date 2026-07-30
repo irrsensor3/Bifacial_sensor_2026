@@ -9,7 +9,7 @@ from ui_sections import (
 )
 
 
-def render():
+def render_admin_controls():
     require_login(role="admin")
 
     st.title("🛠️ Admin Controls")
