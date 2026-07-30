@@ -5,3 +5,5 @@ python-docx
 fpdf2
 supabase
 streamlit-autorefresh
+google-api-python-client
+google-auth
