@@ -19,6 +19,7 @@ from ui_sections import (
 )
 from drive_fetch import list_available_csvs, download_csv_as_df, format_file_label
 
+st.write(f"Current Streamlit Version: {st.__version__}")
 # -------------------------
 # Authentication / session
 # -------------------------
