@@ -76,16 +76,50 @@ def render_data_reports():
 
         st.subheader("📈 Graph Configuration")
 
+        # if a different file was loaded earlier, drop any selected columns
+        # that no longer exist so the multiselect widget doesn't error out
+        if "selected_temps" not in st.session_state:
+            st.session_state.selected_temps = [c for c in numeric_cols if "temp" in c.lower()]
+        else:
+            st.session_state.selected_temps = [c for c in st.session_state.selected_temps if c in numeric_cols]
+
+        temp_label_col, temp_all_col, temp_none_col = st.columns([4, 1, 1])
+        with temp_label_col:
+            st.caption("Temperature Columns")
+        with temp_all_col:
+            if st.button("Select all", key="temp_select_all", use_container_width=True):
+                st.session_state.selected_temps = numeric_cols
+        with temp_none_col:
+            if st.button("Remove all", key="temp_remove_all", use_container_width=True):
+                st.session_state.selected_temps = []
+
         selected_temps = st.multiselect(
             "Select Temperature Columns",
             numeric_cols,
-            default=[c for c in numeric_cols if "temp" in c.lower()]
+            key="selected_temps",
+            label_visibility="collapsed",
         )
+
+        if "selected_irradiance" not in st.session_state:
+            st.session_state.selected_irradiance = [c for c in numeric_cols if "irr" in c.lower()]
+        else:
+            st.session_state.selected_irradiance = [c for c in st.session_state.selected_irradiance if c in numeric_cols]
+
+        irr_label_col, irr_all_col, irr_none_col = st.columns([4, 1, 1])
+        with irr_label_col:
+            st.caption("Irradiance Columns")
+        with irr_all_col:
+            if st.button("Select all", key="irr_select_all", use_container_width=True):
+                st.session_state.selected_irradiance = numeric_cols
+        with irr_none_col:
+            if st.button("Remove all", key="irr_remove_all", use_container_width=True):
+                st.session_state.selected_irradiance = []
 
         selected_irradiance = st.multiselect(
             "Select Irradiance Columns",
             numeric_cols,
-            default=[c for c in numeric_cols if "irr" in c.lower()]
+            key="selected_irradiance",
+            label_visibility="collapsed",
         )
 
         temperatures = {col: df[col].tolist() for col in selected_temps}
