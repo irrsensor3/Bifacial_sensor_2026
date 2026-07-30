@@ -90,7 +90,7 @@ def plot_weather_signals(time, temperatures, irradiances, title="Weather Data"):
     fig, ax1 = plt.subplots(figsize=(12, 6))
 
     for label, temp_values in temperatures.items():
-        ax1.plot(time, temp_values, label=label)
+        ax1.plot(time, temp_values, label=str(label))
 
     ax1.set_xlabel("Time")
     ax1.set_ylabel("Temperature (°C)")
@@ -98,7 +98,7 @@ def plot_weather_signals(time, temperatures, irradiances, title="Weather Data"):
     ax2 = ax1.twinx()
 
     for label, irr_values in irradiances.items():
-        ax2.plot(time, irr_values, linestyle="--", label=label)
+        ax2.plot(time, irr_values, linestyle="--", label=str(label))
 
     ax2.set_ylabel("Irradiance (W/m²)")
 
