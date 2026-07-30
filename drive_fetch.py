@@ -43,34 +43,51 @@ def _get_folder_id(service, folder_name=DRIVE_FOLDER_NAME):
     return files[0]["id"]
 
 
+def _find_all_csvs_recursive(service, root_folder_id):
+    """Walks the folder tree starting at root_folder_id (breadth-first)
+    and collects every CSV found at any depth — needed because the Pi
+    logger organizes files into <root>/<year>/<month>/*.csv rather than
+    dropping them flat in the top-level folder."""
+    csv_files = []
+    folders_to_search = [root_folder_id]
+
+    while folders_to_search:
+        current_id = folders_to_search.pop()
+        query = f"'{current_id}' in parents and trashed = false"
+        res = (
+            service.files()
+            .list(
+                q=query,
+                fields="files(id, name, mimeType, modifiedTime)",
+                pageSize=1000,
+            )
+            .execute()
+        )
+        for entry in res.get("files", []):
+            if entry["mimeType"] == "application/vnd.google-apps.folder":
+                folders_to_search.append(entry["id"])
+            elif entry["name"].lower().endswith(".csv"):
+                csv_files.append(entry)
+
+    return csv_files
+
+
 @st.cache_data(ttl=60)
 def list_available_csvs():
     """Returns a list of dicts (id, name, modifiedTime) for every CSV
-    in the Drive folder, newest first. Returns an empty list (rather
-    than raising) on any failure, so the UI can show a friendly
-    message instead of crashing the whole app."""
+    anywhere under the Drive folder (including year/month
+    subfolders), newest first. Returns an empty list (rather than
+    raising) on any failure, so the UI can show a friendly message
+    instead of crashing the whole app."""
     try:
         service = _get_drive_service()
         folder_id = _get_folder_id(service)
         if folder_id is None:
             return []
 
-        query = (
-            f"'{folder_id}' in parents and "
-            "mimeType = 'text/csv' and "
-            "trashed = false"
-        )
-        res = (
-            service.files()
-            .list(
-                q=query,
-                fields="files(id, name, modifiedTime)",
-                orderBy="modifiedTime desc",
-                pageSize=200,
-            )
-            .execute()
-        )
-        return res.get("files", [])
+        files = _find_all_csvs_recursive(service, folder_id)
+        files.sort(key=lambda f: f.get("modifiedTime", ""), reverse=True)
+        return files
     except Exception as e:
         st.session_state["_drive_list_error"] = str(e)
         return []
