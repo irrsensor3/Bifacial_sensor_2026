@@ -87,6 +87,12 @@ def fig_to_image_bytes(fig):
 
 
 def plot_weather_signals(time, temperatures, irradiances, title="Weather Data"):
+    # A blank/missing cell in the Time column reads as NaN (a float),
+    # which crashes matplotlib's categorical x-axis if it's mixed in
+    # with real time strings. Coerce everything to str so the axis
+    # type is uniform.
+    time = pd.Series(time).astype(str)
+
     fig, ax1 = plt.subplots(figsize=(12, 6))
 
     for label, temp_values in temperatures.items():
