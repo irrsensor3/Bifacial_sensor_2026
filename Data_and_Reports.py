@@ -11,7 +11,7 @@ from ui_sections import (
 from drive_fetch import list_available_csvs, download_csv_as_df, format_file_label
 
 
-def render():
+def render_data_reports():
     require_login()
 
     st.title("📁 Data & Reports")
