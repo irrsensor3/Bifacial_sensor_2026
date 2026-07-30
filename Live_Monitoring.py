@@ -10,7 +10,7 @@ from ui_sections import (
 )
 
 
-def render():
+def render_live_monitoring():
     require_login()
 
     st.title("📡 Live Monitoring")
