@@ -4,6 +4,7 @@ from ui_sections import login
 from Data_and_Reports import render_data_reports
 from Live_Monitoring import render_live_monitoring
 from Admin_Controls import render_admin_controls
+from Irradiance_Tracker import render_irradiance_tracker
 
 st.set_page_config(
     page_title="Bifacial PV Data Logging System",
@@ -38,6 +39,7 @@ if st.sidebar.button("🚪 Logout"):
 pages = [
     st.Page(render_data_reports, title="Data & Reports", icon="📁"),
     st.Page(render_live_monitoring, title="Live Monitoring", icon="📡"),
+    st.Page(render_irradiance_tracker, title="Irradiance Tracker", icon="📈"),
 ]
 
 if st.session_state.user_role == "admin":
