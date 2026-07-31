@@ -47,12 +47,15 @@ def _find_all_csvs_recursive(service, root_folder_id):
     """Walks the folder tree starting at root_folder_id (breadth-first)
     and collects every CSV found at any depth — needed because the Pi
     logger organizes files into <root>/<year>/<month>/*.csv rather than
-    dropping them flat in the top-level folder."""
+    dropping them flat in the top-level folder. Each returned entry
+    gets a "folder_path" list (e.g. ["2026", "07"]) recording which
+    subfolders it was found under, so callers can group files by year
+    without guessing from filenames or Drive's modifiedTime."""
     csv_files = []
-    folders_to_search = [root_folder_id]
+    folders_to_search = [(root_folder_id, [])]
 
     while folders_to_search:
-        current_id = folders_to_search.pop()
+        current_id, path_parts = folders_to_search.pop()
         query = f"'{current_id}' in parents and trashed = false"
         res = (
             service.files()
@@ -65,8 +68,9 @@ def _find_all_csvs_recursive(service, root_folder_id):
         )
         for entry in res.get("files", []):
             if entry["mimeType"] == "application/vnd.google-apps.folder":
-                folders_to_search.append(entry["id"])
+                folders_to_search.append((entry["id"], path_parts + [entry["name"]]))
             elif entry["name"].lower().endswith(".csv"):
+                entry["folder_path"] = path_parts
                 csv_files.append(entry)
 
     return csv_files
@@ -120,3 +124,35 @@ def format_file_label(file_entry: dict) -> str:
     except Exception:
         modified_label = modified
     return f"{name} — modified {modified_label}" if modified_label else name
+
+
+def extract_year(file_entry: dict) -> str:
+    """Best-effort year for a CSV. Prefers the <year> folder it was
+    found under (matches the Pi logger's <root>/<year>/<month>/*.csv
+    layout) since that reflects when the data was actually logged;
+    falls back to the file's Drive modifiedTime for files that aren't
+    organized that way."""
+    path = file_entry.get("folder_path") or []
+    if path and path[0].isdigit() and len(path[0]) == 4:
+        return path[0]
+    modified = file_entry.get("modifiedTime", "")
+    return modified[:4] if modified else "unknown"
+
+
+@st.cache_data(ttl=3600)
+def download_and_combine_csvs(file_ids: tuple) -> pd.DataFrame:
+    """Downloads several CSVs by file ID and concatenates them into one
+    DataFrame — used to build a full year's worth of data for the
+    annual irradiance tracker. Cached for an hour since a year's data
+    doesn't change minute to minute. Skips any individual file that
+    fails to download rather than failing the whole batch, since one
+    corrupt/partial sync shouldn't block the rest of the year."""
+    dfs = []
+    for file_id in file_ids:
+        try:
+            dfs.append(download_csv_as_df(file_id))
+        except Exception:
+            continue
+    if not dfs:
+        return pd.DataFrame()
+    return pd.concat(dfs, ignore_index=True)
