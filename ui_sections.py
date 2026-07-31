@@ -119,6 +119,28 @@ def plot_weather_signals(time, temperatures, irradiances, title="Weather Data"):
     return fig
 
 
+def plot_irradiance_frequency(df, columns, bin_width=50, max_irr=1200):
+    """Returns {column: matplotlib figure}, one histogram per column,
+    showing how often that sensor's irradiance readings fell into each
+    bin from 0 up to max_irr W/m². Non-numeric/out-of-range values are
+    dropped before binning rather than raising."""
+    bins = list(range(0, max_irr + bin_width, bin_width))
+    figs = {}
+    for col in columns:
+        values = pd.to_numeric(df[col], errors="coerce").dropna()
+        values = values[(values >= 0) & (values <= max_irr)]
+
+        fig, ax = plt.subplots(figsize=(10, 4))
+        ax.hist(values, bins=bins, color="#f5a623", edgecolor="black")
+        ax.set_xlabel("Irradiance (W/m²)")
+        ax.set_ylabel("Frequency")
+        ax.set_title(str(col))
+        ax.set_xlim(0, max_irr)
+        fig.tight_layout()
+        figs[col] = fig
+    return figs
+
+
 # =========================
 # REPORT DATA BUILDERS & RENDERERS
 # =========================
