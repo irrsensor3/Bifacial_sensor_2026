@@ -2,6 +2,7 @@ import streamlit as st
 
 from ui_sections import (
     require_login,
+    page_stamp,
     supabase,
     get_forced_sensors,
     set_sensor_force,
@@ -12,6 +13,7 @@ from ui_sections import (
 def render_admin_controls():
     require_login(role="admin")
 
+    page_stamp("Admin Controls")
     st.title("🛠️ Admin Controls")
 
     # -------------------------
