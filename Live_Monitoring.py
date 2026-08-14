@@ -4,6 +4,7 @@ from streamlit_autorefresh import st_autorefresh
 
 from ui_sections import (
     require_login,
+    page_stamp,
     fetch_latest_readings,
     fetch_recent_alerts,
     fetch_latest_panel_readings,
@@ -13,6 +14,7 @@ from ui_sections import (
 def render_live_monitoring():
     require_login()
 
+    page_stamp("Live Monitoring")
     st.title("📡 Live Monitoring")
 
     # -------------------------
