@@ -3,6 +3,7 @@ import pandas as pd
 
 from ui_sections import (
     require_login,
+    page_stamp,
     plot_weather_signals,
     preview_report_content,
     generate_word_report,
@@ -14,6 +15,7 @@ from drive_fetch import list_available_csvs, download_csv_as_df, format_file_lab
 def render_data_reports():
     require_login()
 
+    page_stamp("Data & Reports")
     st.title("📁 Data & Reports")
 
     # -------------------------
