@@ -75,6 +75,152 @@ def require_login(role: str | None = None):
         st.stop()
 
 
+def inject_theme():
+    """Injects the 'Field Notebook' visual theme — warm paper
+    background, forest green + rust accents, slab-serif headers,
+    monospace numeric readouts. Called once from app.py; since
+    st.navigation reruns app.py's whole script on every page switch,
+    one call there covers every page, no per-page injection needed."""
+    st.markdown(
+        """
+        <style>
+        @import url('https://fonts.googleapis.com/css2?family=Zilla+Slab:wght@500;700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap');
+
+        :root {
+            --paper: #EDE3CC;
+            --paper-card: #F7F1E1;
+            --ink: #2B2620;
+            --ink-muted: #6B6252;
+            --forest: #2F4B3C;
+            --rust: #A54C28;
+            --hairline: #C9BB98;
+        }
+
+        .stApp {
+            background-color: var(--paper);
+            background-image: repeating-linear-gradient(
+                to bottom, transparent, transparent 27px, var(--hairline) 28px
+            );
+            color: var(--ink);
+        }
+
+        section[data-testid="stSidebar"] {
+            background-color: var(--forest);
+            border-right: 2px solid var(--ink);
+        }
+        section[data-testid="stSidebar"] * {
+            color: var(--paper-card) !important;
+            font-family: 'IBM Plex Sans', sans-serif;
+        }
+        section[data-testid="stSidebar"] a[aria-current="page"] {
+            background-color: rgba(247, 241, 225, 0.15);
+            border-left: 3px solid var(--rust);
+        }
+
+        h1, h2, h3 {
+            font-family: 'Zilla Slab', serif !important;
+            color: var(--ink) !important;
+            letter-spacing: 0.2px;
+        }
+        h1 { border-bottom: 3px solid var(--forest); padding-bottom: 0.3rem; }
+
+        body, p, div, span, label {
+            font-family: 'IBM Plex Sans', sans-serif;
+        }
+
+        [data-testid="stMetricValue"] {
+            font-family: 'IBM Plex Mono', monospace !important;
+            color: var(--forest) !important;
+        }
+        [data-testid="stMetricLabel"] {
+            font-family: 'IBM Plex Mono', monospace !important;
+            color: var(--ink-muted) !important;
+            text-transform: uppercase;
+            font-size: 0.75rem !important;
+            letter-spacing: 0.05em;
+        }
+
+        div[data-testid="stExpander"],
+        div[data-testid="stDataFrame"],
+        div[data-testid="stVerticalBlockBorderWrapper"] {
+            background-color: var(--paper-card) !important;
+            border: 1px solid var(--hairline) !important;
+            border-radius: 4px !important;
+        }
+
+        .stButton > button {
+            font-family: 'IBM Plex Mono', monospace;
+            text-transform: uppercase;
+            font-size: 0.78rem;
+            letter-spacing: 0.04em;
+            background-color: var(--paper-card);
+            color: var(--rust);
+            border: 1.5px solid var(--rust);
+            border-radius: 3px;
+            padding: 0.4rem 0.9rem;
+        }
+        .stButton > button:hover {
+            background-color: var(--rust);
+            color: var(--paper-card);
+            border-color: var(--rust);
+        }
+        .stButton > button:focus:not(:active) {
+            outline: 2px solid var(--forest);
+            outline-offset: 1px;
+        }
+        .stButton > button[kind="primary"] {
+            background-color: var(--forest);
+            color: var(--paper-card);
+            border-color: var(--forest);
+        }
+
+        hr, div[data-testid="stDivider"] {
+            border-top: 1px dashed var(--hairline) !important;
+        }
+
+        .stTextInput input, .stTextArea textarea,
+        .stSelectbox div[data-baseweb="select"] {
+            background-color: var(--paper-card) !important;
+            border: 1px solid var(--hairline) !important;
+            color: var(--ink) !important;
+            font-family: 'IBM Plex Sans', sans-serif;
+        }
+
+        [data-testid="stCaptionContainer"] {
+            font-family: 'IBM Plex Mono', monospace !important;
+            color: var(--ink-muted) !important;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def page_stamp(label: str):
+    """Renders the small 'LOG · <page>' chip at the top of a page —
+    the one signature flourish of the Field Notebook theme, styled
+    like a case-file tag."""
+    st.markdown(
+        f"""
+        <div style="
+            display:inline-block;
+            font-family:'IBM Plex Mono', monospace;
+            font-size:0.72rem;
+            letter-spacing:0.08em;
+            text-transform:uppercase;
+            color:#A54C28;
+            border:1.5px solid #A54C28;
+            border-radius:3px;
+            padding:2px 10px;
+            margin-bottom:0.6rem;
+        ">
+            Log · {label}
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 # =========================
 # PLOTTING HELPERS
 # =========================
