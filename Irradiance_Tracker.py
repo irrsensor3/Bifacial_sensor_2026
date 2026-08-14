@@ -1,6 +1,6 @@
 import streamlit as st
 
-from ui_sections import require_login, plot_irradiance_frequency
+from ui_sections import require_login, page_stamp, plot_irradiance_frequency
 from drive_fetch import list_available_csvs, download_and_combine_csvs, extract_year
 
 MAX_IRRADIANCE = 1200  # W/m²
@@ -9,6 +9,7 @@ MAX_IRRADIANCE = 1200  # W/m²
 def render_irradiance_tracker():
     require_login()
 
+    page_stamp("Irradiance Tracker")
     st.title("📈 Annual Irradiance Tracker")
     st.caption(
         f"Frequency distribution of irradiance readings (0-{MAX_IRRADIANCE} W/m²), "
