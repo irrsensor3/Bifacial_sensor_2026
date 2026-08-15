@@ -1,7 +1,13 @@
 import streamlit as st
 
 from ui_sections import require_login, page_stamp, plot_irradiance_frequency
-from drive_fetch import list_available_csvs, download_and_combine_csvs, extract_year
+from drive_fetch import (
+    list_available_csvs,
+    download_and_combine_csvs,
+    extract_year,
+    extract_month,
+    month_label,
+)
 
 MAX_IRRADIANCE = 1200  # W/m²
 
@@ -10,10 +16,10 @@ def render_irradiance_tracker():
     require_login()
 
     page_stamp("Irradiance Tracker")
-    st.title("📈 Annual Irradiance Tracker")
+    st.title("📈 Irradiance Tracker")
     st.caption(
         f"Frequency distribution of irradiance readings (0-{MAX_IRRADIANCE} W/m²), "
-        "built from every CSV synced from Google Drive for the selected year — "
+        "built from every CSV synced from Google Drive for the selected month — "
         "one chart per sensor."
     )
 
@@ -31,29 +37,36 @@ def render_irradiance_tracker():
         return
 
     years = sorted({extract_year(f) for f in available_files}, reverse=True)
-    selected_year = st.selectbox("Year", years, index=0)
+    year_col, month_col = st.columns(2)
+    with year_col:
+        selected_year = st.selectbox("Year", years, index=0)
 
     year_files = [f for f in available_files if extract_year(f) == selected_year]
-    st.caption(f"{len(year_files)} file(s) found for {selected_year}")
+    months = sorted({extract_month(f) for f in year_files})
+    with month_col:
+        selected_month = st.selectbox("Month", months, index=len(months) - 1, format_func=month_label)
 
-    if st.button("📥 Load year data"):
-        file_ids = tuple(f["id"] for f in year_files)
-        with st.spinner(f"Downloading {len(file_ids)} file(s) for {selected_year}..."):
-            df_year = download_and_combine_csvs(file_ids)
-        st.session_state["_irr_tracker_df"] = df_year
-        st.session_state["_irr_tracker_year"] = selected_year
-        st.success(f"Loaded {df_year.shape[0]} rows across {len(year_files)} file(s)")
+    period_files = [f for f in year_files if extract_month(f) == selected_month]
+    st.caption(f"{len(period_files)} file(s) found for {month_label(selected_month)} {selected_year}")
 
-    df_year = st.session_state.get("_irr_tracker_df")
+    if st.button("📥 Load month data"):
+        file_ids = tuple(f["id"] for f in period_files)
+        with st.spinner(f"Downloading {len(file_ids)} file(s) for {month_label(selected_month)} {selected_year}..."):
+            df_month = download_and_combine_csvs(file_ids)
+        st.session_state["_irr_tracker_df"] = df_month
+        st.session_state["_irr_tracker_period"] = (selected_year, selected_month)
+        st.success(f"Loaded {df_month.shape[0]} rows across {len(period_files)} file(s)")
 
-    if df_year is None or df_year.empty:
-        st.info("Load a year's data above to see the frequency charts.")
+    df_month = st.session_state.get("_irr_tracker_df")
+
+    if df_month is None or df_month.empty:
+        st.info("Load a month's data above to see the frequency charts.")
         return
 
-    if st.session_state.get("_irr_tracker_year") != selected_year:
-        st.info("You've changed the year — click 'Load year data' again to refresh the charts.")
+    if st.session_state.get("_irr_tracker_period") != (selected_year, selected_month):
+        st.info("You've changed the period — click 'Load month data' again to refresh the charts.")
 
-    irr_cols = [c for c in df_year.columns if c.startswith("Irr_")]
+    irr_cols = [c for c in df_month.columns if c.startswith("Irr_")]
 
     if not irr_cols:
         st.warning("No Irr_ columns found in the loaded data.")
@@ -90,7 +103,7 @@ def render_irradiance_tracker():
         return
 
     figs = plot_irradiance_frequency(
-        df_year, selected_cols, bin_width=bin_width, max_irr=MAX_IRRADIANCE
+        df_month, selected_cols, bin_width=bin_width, max_irr=MAX_IRRADIANCE
     )
 
     for col in selected_cols:
