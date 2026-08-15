@@ -57,27 +57,47 @@ with gauge_col:
 
     irr_value = 0.0
     if not df_live.empty:
+        # find irradiance sensor columns (columns starting with "Irr_")
         irr_cols = [c for c in df_live.columns if c.startswith("Irr_")]
         if irr_cols:
+            # convert to numeric, forward-fill, then average across the
+            # last N rows and across sensors so the gauge shows a true
+            # recent average (not just the last row or a single sensor)
             recent = df_live[irr_cols].apply(pd.to_numeric, errors="coerce").ffill()
-            mean_val = recent.iloc[-1].mean()
-            irr_value = float(mean_val) if pd.notna(mean_val) else 0.0
+            # compute mean across rows and columns
+            try:
+                mean_val = float(recent.stack().mean())
+            except Exception:
+                mean_val = float(recent.mean(axis=1).iloc[-1]) if not recent.empty else 0.0
+            irr_value = mean_val if pd.notna(mean_val) else 0.0
 
     power_value = 0.0
     if not df_panel.empty and "active_power_kw" in df_panel.columns:
+        # convert to numeric and forward-fill; then take the mean across
+        # the recent rows so the displayed value is an average
         recent_power = pd.to_numeric(df_panel["active_power_kw"], errors="coerce").ffill()
-        last_val = recent_power.iloc[-1]
-        power_value = float(last_val) if pd.notna(last_val) else 0.0
+        try:
+            mean_power = float(recent_power.mean())
+        except Exception:
+            mean_power = float(recent_power.iloc[-1]) if not recent_power.empty else 0.0
+
+        # sanity: if the stored values are in watts by mistake (very large
+        # numbers), convert to kW. The column name suggests kW, so this is
+        # only a fallback check.
+        if mean_power > 1000:  # >1000 kW is unrealistic; maybe values are in W
+            mean_power = mean_power / 1000.0
+
+        power_value = mean_power if pd.notna(mean_power) else 0.0
 
     g1, g2 = st.columns(2)
     with g1:
         st.plotly_chart(
-            plot_gauge(irr_value, MAX_IRRADIANCE, "Irradiance", "W/m²", color="#F59E0B"),
+            plot_gauge(irr_value, MAX_IRRADIANCE, "Average Irradiance", "W/m²", color="#F59E0B"),
             use_container_width=True,
         )
     with g2:
         st.plotly_chart(
-            plot_gauge(power_value, PANEL_CAPACITY_KW, "Panel Power", "kW", color="#22C55E"),
+            plot_gauge(power_value, PANEL_CAPACITY_KW, "Average Panel Power", "kW", color="#22C55E"),
             use_container_width=True,
         )
 
