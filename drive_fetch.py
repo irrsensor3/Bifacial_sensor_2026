@@ -146,6 +146,34 @@ def extract_year(file_entry: dict) -> str:
     return modified[:4] if modified else "unknown"
 
 
+MONTH_LABELS = {
+    "01": "January", "02": "February", "03": "March", "04": "April",
+    "05": "May", "06": "June", "07": "July", "08": "August",
+    "09": "September", "10": "October", "11": "November", "12": "December",
+}
+
+
+def extract_month(file_entry: dict) -> str:
+    """Best-effort zero-padded month ('01'-'12') for a CSV — the
+    folder immediately after whichever <year> folder was found in its
+    path. Falls back to the file's Drive modifiedTime for files that
+    aren't organized that way."""
+    path = file_entry.get("folder_path") or []
+    for i, part in enumerate(path):
+        if part.isdigit() and len(part) == 4:
+            if i + 1 < len(path) and path[i + 1].isdigit():
+                return path[i + 1].zfill(2)
+            break
+    modified = file_entry.get("modifiedTime", "")
+    return modified[5:7] if len(modified) >= 7 else "unknown"
+
+
+def month_label(month: str) -> str:
+    """'07' -> '07 - July'; falls back to the raw value if unrecognized."""
+    name = MONTH_LABELS.get(month)
+    return f"{month} - {name}" if name else month
+
+
 @st.cache_data(ttl=3600)
 def download_and_combine_csvs(file_ids: tuple) -> pd.DataFrame:
     """Downloads several CSVs by file ID and concatenates them into one
