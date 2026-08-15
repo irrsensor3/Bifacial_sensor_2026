@@ -9,7 +9,13 @@ from ui_sections import (
     generate_word_report,
     generate_pdf_report,
 )
-from drive_fetch import list_available_csvs, download_csv_as_df, format_file_label
+from drive_fetch import (
+    list_available_csvs,
+    download_csv_as_df,
+    format_file_label,
+    list_available_dcm_csvs,
+    download_dcm_csv_as_df,
+)
 
 
 def render_data_reports():
@@ -60,6 +66,47 @@ def render_data_reports():
         if df is None and "_loaded_df" in st.session_state:
             df = st.session_state["_loaded_df"]
             st.caption(f"Currently loaded: {st.session_state.get('_loaded_filename', '')}")
+
+    # -------------------------
+    # Optional: DC meter data from the separate panel-meter-data folder
+    # -------------------------
+    st.subheader("🔌 Select DC Meter Data (optional)")
+
+    available_dcm_files = list_available_dcm_csvs()
+
+    df_dcm = None
+
+    if not available_dcm_files:
+        st.caption(
+            "No DC meter CSVs found in Drive — reports still work "
+            "without this, it just won't include a DC Meter Summary section."
+        )
+        if st.session_state.get("_dcm_drive_list_error"):
+            with st.expander("Error details"):
+                st.code(st.session_state["_dcm_drive_list_error"])
+    else:
+        dcm_labels = [format_file_label(f) for f in available_dcm_files]
+        dcm_selected_idx = st.selectbox(
+            "DC meter CSV file (most recent first)",
+            options=range(len(available_dcm_files)),
+            format_func=lambda i: dcm_labels[i],
+            index=0,
+            key="dcm_file_select",
+        )
+        selected_dcm_file = available_dcm_files[dcm_selected_idx]
+
+        if st.button("📥 Load DC meter file"):
+            try:
+                df_dcm = download_dcm_csv_as_df(selected_dcm_file["id"])
+                st.session_state["_loaded_dcm_df"] = df_dcm
+                st.session_state["_loaded_dcm_filename"] = selected_dcm_file["name"]
+                st.success(f"Loaded {selected_dcm_file['name']} ({df_dcm.shape[0]} rows)")
+            except Exception as e:
+                st.error(f"Couldn't download that file: {e}")
+
+        if df_dcm is None and "_loaded_dcm_df" in st.session_state:
+            df_dcm = st.session_state["_loaded_dcm_df"]
+            st.caption(f"Currently loaded: {st.session_state.get('_loaded_dcm_filename', '')}")
 
     report_title = st.text_input("Report Title", "Bifacial PV Performance Report")
     observation = st.text_area("Observation Notes")
@@ -138,13 +185,13 @@ def render_data_reports():
 
             if st.session_state.get("show_preview"):
                 with st.expander("📋 Report Preview", expanded=True):
-                    preview_report_content(df, report_title, observation, fig)
+                    preview_report_content(df, report_title, observation, fig, df_dcm=df_dcm)
 
                 st.divider()
                 col1, col2 = st.columns(2)
 
                 with col1:
-                    report = generate_word_report(df, report_title, observation, fig)
+                    report = generate_word_report(df, report_title, observation, fig, df_dcm=df_dcm)
                     st.download_button(
                         label="⬇️ Download Word Report",
                         data=report,
@@ -153,7 +200,7 @@ def render_data_reports():
                     )
 
                 with col2:
-                    report = generate_pdf_report(df, report_title, observation, fig)
+                    report = generate_pdf_report(df, report_title, observation, fig, df_dcm=df_dcm)
                     st.download_button(
                         label="⬇️ Download PDF Report",
                         data=report,
