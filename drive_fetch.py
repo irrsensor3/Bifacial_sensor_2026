@@ -11,6 +11,11 @@ from googleapiclient.http import MediaIoBaseDownload
 # "/home/skyimager5/Desktop/bifacial data" gdrive:bifacial-data)
 DRIVE_FOLDER_NAME = "bifacial-data"
 
+# Separate Drive folder for DC meter (voltage/current/power) CSVs —
+# organized as <root>/<device_id>/<year>/<month>/*.csv, one subfolder
+# per meter device (e.g. dcm_3366)
+DCM_DRIVE_FOLDER_NAME = "panel-meter-data"
+
 SCOPES = ["https://www.googleapis.com/auth/drive.readonly"]
 
 
@@ -128,13 +133,15 @@ def format_file_label(file_entry: dict) -> str:
 
 def extract_year(file_entry: dict) -> str:
     """Best-effort year for a CSV. Prefers the <year> folder it was
-    found under (matches the Pi logger's <root>/<year>/<month>/*.csv
-    layout) since that reflects when the data was actually logged;
-    falls back to the file's Drive modifiedTime for files that aren't
-    organized that way."""
+    found under — searches every level of its folder path (not just
+    the first) since different Drive folders nest at different depths
+    (e.g. bifacial-data is <root>/<year>/<month>, panel-meter-data is
+    <root>/<device_id>/<year>/<month>). Falls back to the file's Drive
+    modifiedTime for files that aren't organized that way."""
     path = file_entry.get("folder_path") or []
-    if path and path[0].isdigit() and len(path[0]) == 4:
-        return path[0]
+    for part in path:
+        if part.isdigit() and len(part) == 4:
+            return part
     modified = file_entry.get("modifiedTime", "")
     return modified[:4] if modified else "unknown"
 
@@ -156,3 +163,75 @@ def download_and_combine_csvs(file_ids: tuple) -> pd.DataFrame:
     if not dfs:
         return pd.DataFrame()
     return pd.concat(dfs, ignore_index=True)
+
+
+# =========================
+# DC METER (panel-meter-data) — separate Drive folder, separate CSV
+# schema (long format: one row per device per timestamp), so it gets
+# its own listing + download helpers rather than reusing the sensor
+# ones above.
+# =========================
+
+@st.cache_data(ttl=60)
+def list_available_dcm_csvs():
+    """Same idea as list_available_csvs(), but for the DC meter CSVs
+    under the separate 'panel-meter-data' Drive folder. Returns an
+    empty list (rather than raising) on any failure."""
+    try:
+        service = _get_drive_service()
+        folder_id = _get_folder_id(service, DCM_DRIVE_FOLDER_NAME)
+        if folder_id is None:
+            return []
+
+        files = _find_all_csvs_recursive(service, folder_id)
+        files.sort(key=lambda f: f.get("modifiedTime", ""), reverse=True)
+        return files
+    except Exception as e:
+        st.session_state["_dcm_drive_list_error"] = str(e)
+        return []
+
+
+def _standardize_dcm_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Renames a raw DC-meter CSV's columns (Datetime, Device_ID,
+    Forward_energy_kWh, Active_power_kW, Current_A, Voltage_V, Error)
+    to match the live Supabase panel_readings schema (created_at,
+    device_id, forward_energy_kwh, active_power_kw, current_a,
+    voltage_v, error), and parses created_at to a real datetime — so
+    historical and live DC meter data can be combined and handled
+    identically downstream."""
+    rename_map = {
+        "Datetime": "created_at",
+        "Device_ID": "device_id",
+        "Forward_energy_kWh": "forward_energy_kwh",
+        "Active_power_kW": "active_power_kw",
+        "Current_A": "current_a",
+        "Voltage_V": "voltage_v",
+        "Error": "error",
+    }
+    df = df.rename(columns=rename_map)
+    if "created_at" in df.columns:
+        df["created_at"] = pd.to_datetime(df["created_at"], errors="coerce")
+    return df
+
+
+def download_dcm_csv_as_df(file_id: str) -> pd.DataFrame:
+    """Downloads a single DC-meter CSV and standardizes its columns.
+    Raises on failure, same as download_csv_as_df."""
+    return _standardize_dcm_columns(download_csv_as_df(file_id))
+
+
+@st.cache_data(ttl=3600)
+def download_and_combine_dcm_csvs(file_ids: tuple) -> pd.DataFrame:
+    """Downloads several DC-meter CSVs by file ID, concatenates them,
+    and standardizes columns — used to append a full year of DC meter
+    history onto the live chart. Skips any file that fails to
+    download rather than failing the whole batch."""
+    dfs = []
+    for file_id in file_ids:
+        try:
+            dfs.append(download_csv_as_df(file_id))
+        except Exception:
+            continue
+    if not dfs:
+        return pd.DataFrame()
+    return _standardize_dcm_columns(pd.concat(dfs, ignore_index=True))
