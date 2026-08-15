@@ -1,4 +1,5 @@
 import streamlit as st
+import pandas as pd
 
 from ui_sections import (
     login,
@@ -49,18 +50,24 @@ if st.sidebar.button("🚪 Logout"):
 gauge_col, photo_col = st.columns([2, 1])
 
 with gauge_col:
-    df_live = fetch_latest_readings(limit=1)
-    df_panel = fetch_latest_panel_readings(limit=1)
+    # pull a few recent rows (not just the latest one) and forward-fill,
+    # since a single row can have gaps where a sensor didn't report
+    df_live = fetch_latest_readings(limit=5)
+    df_panel = fetch_latest_panel_readings(limit=5)
 
     irr_value = 0.0
     if not df_live.empty:
         irr_cols = [c for c in df_live.columns if c.startswith("Irr_")]
         if irr_cols:
-            irr_value = float(df_live.iloc[-1][irr_cols].mean())
+            recent = df_live[irr_cols].apply(pd.to_numeric, errors="coerce").ffill()
+            mean_val = recent.iloc[-1].mean()
+            irr_value = float(mean_val) if pd.notna(mean_val) else 0.0
 
     power_value = 0.0
     if not df_panel.empty and "active_power_kw" in df_panel.columns:
-        power_value = float(df_panel.iloc[-1]["active_power_kw"] or 0)
+        recent_power = pd.to_numeric(df_panel["active_power_kw"], errors="coerce").ffill()
+        last_val = recent_power.iloc[-1]
+        power_value = float(last_val) if pd.notna(last_val) else 0.0
 
     g1, g2 = st.columns(2)
     with g1:
