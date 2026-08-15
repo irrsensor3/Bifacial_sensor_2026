@@ -9,7 +9,13 @@ from ui_sections import (
     fetch_recent_alerts,
     fetch_latest_panel_readings,
 )
-from drive_fetch import list_available_csvs, download_and_combine_csvs, extract_year
+from drive_fetch import (
+    list_available_csvs,
+    download_and_combine_csvs,
+    extract_year,
+    list_available_dcm_csvs,
+    download_and_combine_dcm_csvs,
+)
 
 
 def render_live_monitoring():
@@ -177,6 +183,10 @@ def render_live_monitoring():
     if df_panel.empty:
         st.info("No live panel meter data yet — waiting for the mini PC to push a sample.")
     else:
+        # normalize to a real datetime up front so it combines cleanly
+        # with historical Drive data later, and sorts correctly
+        df_panel["created_at"] = pd.to_datetime(df_panel["created_at"], errors="coerce")
+
         latest_per_device = (
             df_panel.sort_values("created_at").groupby("device_id").tail(1).sort_values("device_id")
         )
@@ -198,8 +208,61 @@ def render_live_monitoring():
             if has_error:
                 st.caption(f"⚠️ {device_label}: {row.get('error')}")
 
+        # -------------------------
+        # Append historical DC meter data onto this same chart
+        # -------------------------
+        with st.expander("🗄️ Append historical DC meter data from Drive"):
+            available_dcm_files = list_available_dcm_csvs()
+            if not available_dcm_files:
+                st.caption("No DC meter CSVs found to append.")
+                if st.session_state.get("_dcm_drive_list_error"):
+                    with st.expander("Error details"):
+                        st.code(st.session_state["_dcm_drive_list_error"])
+            else:
+                dcm_years = sorted({extract_year(f) for f in available_dcm_files}, reverse=True)
+                append_dcm_year = st.selectbox(
+                    "Year to append", dcm_years, index=0, key="dcm_append_year_select"
+                )
+                dcm_year_files = [f for f in available_dcm_files if extract_year(f) == append_dcm_year]
+                st.caption(f"{len(dcm_year_files)} file(s) found for {append_dcm_year}")
+
+                dcm_btn_col, dcm_remove_col = st.columns(2)
+                with dcm_btn_col:
+                    if st.button("📥 Append to graph", key="append_dcm_year_btn"):
+                        file_ids = tuple(f["id"] for f in dcm_year_files)
+                        with st.spinner(f"Downloading {len(file_ids)} file(s) for {append_dcm_year}..."):
+                            df_dcm_hist = download_and_combine_dcm_csvs(file_ids)
+                        st.session_state["_live_append_dcm_df"] = df_dcm_hist
+                        st.session_state["_live_append_dcm_year"] = append_dcm_year
+                        st.success(f"Appended {df_dcm_hist.shape[0]} rows from {append_dcm_year}")
+                with dcm_remove_col:
+                    if st.session_state.get("_live_append_dcm_df") is not None:
+                        if st.button("✖️ Remove appended data", key="remove_dcm_append_btn"):
+                            st.session_state["_live_append_dcm_df"] = None
+                            st.session_state["_live_append_dcm_year"] = None
+                            st.rerun()
+
+                appended_dcm_year = st.session_state.get("_live_append_dcm_year")
+                if appended_dcm_year:
+                    st.caption(f"Currently appended: {appended_dcm_year}")
+
+        # combine live + (optional) historical DC meter data for the
+        # trend chart below; everything above (latest-values snapshot)
+        # stays live-only on purpose
+        df_panel_combined = df_panel
+        df_dcm_hist = st.session_state.get("_live_append_dcm_df")
+        if df_dcm_hist is not None and not df_dcm_hist.empty:
+            needed_cols = [
+                "created_at", "device_id", "voltage_v", "current_a",
+                "active_power_kw", "forward_energy_kwh", "error",
+            ]
+            hist_slice = df_dcm_hist.reindex(columns=needed_cols)
+            live_slice = df_panel.reindex(columns=needed_cols)
+            df_panel_combined = pd.concat([hist_slice, live_slice], ignore_index=True)
+            df_panel_combined = df_panel_combined.dropna(subset=["created_at"]).sort_values("created_at")
+
         st.markdown("### Trend")
-        device_ids = sorted(df_panel["device_id"].dropna().unique().tolist())
+        device_ids = sorted(df_panel_combined["device_id"].dropna().unique().tolist())
         if "selected_devices" not in st.session_state:
             st.session_state.selected_devices = device_ids[:1]
         else:
@@ -229,7 +292,7 @@ def render_live_monitoring():
         )
 
         if selected_devices:
-            pivot = df_panel[df_panel["device_id"].isin(selected_devices)].pivot_table(
+            pivot = df_panel_combined[df_panel_combined["device_id"].isin(selected_devices)].pivot_table(
                 index="created_at", columns="device_id", values=metric_choice
             )
             pivot.columns = [f"Meter {int(c)}" for c in pivot.columns]
