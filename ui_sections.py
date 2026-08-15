@@ -321,8 +321,11 @@ def plot_irradiance_frequency(df, columns, bin_width=50, max_irr=1200):
 # REPORT DATA BUILDERS & RENDERERS
 # =========================
 
-def build_report_data(df, report_title, observation, fig):
-    """Build uniform report data structure"""
+def build_report_data(df, report_title, observation, fig, df_dcm=None):
+    """Build uniform report data structure. df_dcm is optional DC
+    meter data (Datetime/Device_ID/... columns already standardized
+    to created_at/device_id/... by drive_fetch) — when provided, adds
+    a per-device DC meter summary table alongside the sensor summary."""
     start_time = f"{df['Date'].iloc[0]} {df['Time'].iloc[0]}" if "Date" in df.columns and "Time" in df.columns else "N/A"
     end_time = f"{df['Date'].iloc[-1]} {df['Time'].iloc[-1]}" if "Date" in df.columns and "Time" in df.columns else "N/A"
 
@@ -350,18 +353,45 @@ def build_report_data(df, report_title, observation, fig):
                 "Max": f"{numeric_df[col].max():.2f}"
             })
 
+    dcm_summary = None
+    if df_dcm is not None and not df_dcm.empty and "device_id" in df_dcm.columns:
+        metric_defs = [
+            ("voltage_v", "Voltage (V)"),
+            ("current_a", "Current (A)"),
+            ("active_power_kw", "Power (kW)"),
+            ("forward_energy_kwh", "Energy (kWh)"),
+        ]
+        dcm_summary = []
+        for device_id, group in df_dcm.groupby("device_id"):
+            device_label = f"Meter {int(device_id)}" if pd.notna(device_id) else "Unknown meter"
+            for col, label in metric_defs:
+                if col not in group.columns:
+                    continue
+                vals = pd.to_numeric(group[col], errors="coerce").dropna()
+                if vals.empty:
+                    continue
+                dcm_summary.append({
+                    "Column": f"{device_label} — {label}",
+                    "Mean": f"{vals.mean():.2f}",
+                    "Min": f"{vals.min():.2f}",
+                    "Max": f"{vals.max():.2f}",
+                })
+        if not dcm_summary:
+            dcm_summary = None
+
     return {
         "title": report_title,
         "metadata": metadata,
         "columns": columns_list,
         "numeric_summary": numeric_summary,
+        "dcm_summary": dcm_summary,
         "figure": fig
     }
 
 
-def preview_report_content(df, report_title, observation, fig):
+def preview_report_content(df, report_title, observation, fig, df_dcm=None):
     """Display a preview of what will be in the report"""
-    report_data = build_report_data(df, report_title, observation, fig)
+    report_data = build_report_data(df, report_title, observation, fig, df_dcm=df_dcm)
 
     # Report Title
     st.markdown(f"# {report_data['title']}")
@@ -382,13 +412,19 @@ def preview_report_content(df, report_title, observation, fig):
     else:
         st.info("No numeric columns found")
 
+    # DC Meter Summary
+    if report_data['dcm_summary']:
+        st.markdown("## DC Meter Summary")
+        dcm_df = pd.DataFrame(report_data['dcm_summary'])
+        st.dataframe(dcm_df, use_container_width=True, hide_index=True)
+
     # Weather Graph
     st.markdown("## Weather Graph")
     st.pyplot(report_data['figure'])
 
 
-def generate_word_report(df, report_title, observation, fig):
-    report_data = build_report_data(df, report_title, observation, fig)
+def generate_word_report(df, report_title, observation, fig, df_dcm=None):
+    report_data = build_report_data(df, report_title, observation, fig, df_dcm=df_dcm)
 
     doc = Document()
     doc.add_heading(report_data['title'], level=1)
@@ -421,6 +457,22 @@ def generate_word_report(df, report_title, observation, fig):
             summary_table.cell(row_idx, 2).text = row_data["Min"]
             summary_table.cell(row_idx, 3).text = row_data["Max"]
 
+    # DC Meter Summary
+    if report_data['dcm_summary']:
+        doc.add_heading("DC Meter Summary", level=2)
+        dcm_table = doc.add_table(rows=len(report_data['dcm_summary']) + 1, cols=4)
+        dcm_table.style = "Table Grid"
+
+        headers = ["Column", "Mean", "Min", "Max"]
+        for col_idx, header in enumerate(headers):
+            dcm_table.cell(0, col_idx).text = header
+
+        for row_idx, row_data in enumerate(report_data['dcm_summary'], start=1):
+            dcm_table.cell(row_idx, 0).text = row_data["Column"]
+            dcm_table.cell(row_idx, 1).text = row_data["Mean"]
+            dcm_table.cell(row_idx, 2).text = row_data["Min"]
+            dcm_table.cell(row_idx, 3).text = row_data["Max"]
+
     # Weather Graph
     doc.add_heading("Weather Graph", level=2)
     img_stream = fig_to_image_bytes(report_data['figure'])
@@ -432,8 +484,8 @@ def generate_word_report(df, report_title, observation, fig):
     return buffer
 
 
-def generate_pdf_report(df, report_title, observation, fig):
-    report_data = build_report_data(df, report_title, observation, fig)
+def generate_pdf_report(df, report_title, observation, fig, df_dcm=None):
+    report_data = build_report_data(df, report_title, observation, fig, df_dcm=df_dcm)
 
     pdf = FPDF()
     pdf.add_page()
@@ -477,6 +529,26 @@ def generate_pdf_report(df, report_title, observation, fig):
 
         pdf.set_font("Helvetica", size=10)
         for row_data in report_data['numeric_summary']:
+            pdf.cell(45, 8, str(row_data["Column"]), border=1)
+            pdf.cell(45, 8, row_data["Mean"], border=1)
+            pdf.cell(45, 8, row_data["Min"], border=1)
+            pdf.cell(45, 8, row_data["Max"], border=1)
+            pdf.ln()
+
+    # DC Meter Summary
+    if report_data['dcm_summary']:
+        pdf.ln(5)
+        pdf.set_font("Helvetica", "B", 13)
+        pdf.cell(0, 10, "DC Meter Summary", new_x="LMARGIN", new_y="NEXT")
+
+        pdf.set_font("Helvetica", "B", 10)
+        headers = ["Column", "Mean", "Min", "Max"]
+        for header in headers:
+            pdf.cell(45, 8, header, border=1)
+        pdf.ln()
+
+        pdf.set_font("Helvetica", size=10)
+        for row_data in report_data['dcm_summary']:
             pdf.cell(45, 8, str(row_data["Column"]), border=1)
             pdf.cell(45, 8, row_data["Mean"], border=1)
             pdf.cell(45, 8, row_data["Min"], border=1)
