@@ -76,118 +76,112 @@ def require_login(role: str | None = None):
 
 
 def inject_theme():
-    """Injects the 'Field Notebook' visual theme — warm paper
-    background, forest green + rust accents, slab-serif headers,
-    monospace numeric readouts. Called once from app.py; since
+    """Injects the 'Solar Admin' visual theme — light background,
+    white rounded cards with soft shadows, blue/green/amber accent
+    colors, clean sans-serif type. Called once from app.py; since
     st.navigation reruns app.py's whole script on every page switch,
     one call there covers every page, no per-page injection needed."""
     st.markdown(
         """
         <style>
-        @import url('https://fonts.googleapis.com/css2?family=Zilla+Slab:wght@500;700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap');
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
 
         :root {
-            --paper: #EDE3CC;
-            --paper-card: #F7F1E1;
-            --ink: #2B2620;
-            --ink-muted: #6B6252;
-            --forest: #2F4B3C;
-            --rust: #A54C28;
-            --hairline: #C9BB98;
+            --bg: #F1F4F9;
+            --card: #FFFFFF;
+            --ink: #1F2937;
+            --ink-muted: #6B7280;
+            --blue: #3B82F6;
+            --green: #22C55E;
+            --amber: #F59E0B;
+            --purple: #8B5CF6;
+            --border: #E5E9F0;
         }
 
         .stApp {
-            background-color: var(--paper);
-            background-image: repeating-linear-gradient(
-                to bottom, transparent, transparent 27px, var(--hairline) 28px
-            );
+            background-color: var(--bg);
             color: var(--ink);
         }
 
         section[data-testid="stSidebar"] {
-            background-color: var(--forest);
-            border-right: 2px solid var(--ink);
+            background-color: var(--card);
+            border-right: 1px solid var(--border);
         }
         section[data-testid="stSidebar"] * {
-            color: var(--paper-card) !important;
-            font-family: 'IBM Plex Sans', sans-serif;
+            font-family: 'Inter', sans-serif;
+            color: var(--ink) !important;
         }
         section[data-testid="stSidebar"] a[aria-current="page"] {
-            background-color: rgba(247, 241, 225, 0.15);
-            border-left: 3px solid var(--rust);
+            background-color: #EFF6FF;
+            border-left: 3px solid var(--blue);
+            border-radius: 6px;
         }
 
         h1, h2, h3 {
-            font-family: 'Zilla Slab', serif !important;
+            font-family: 'Inter', sans-serif !important;
+            font-weight: 700 !important;
             color: var(--ink) !important;
-            letter-spacing: 0.2px;
         }
-        h1 { border-bottom: 3px solid var(--forest); padding-bottom: 0.3rem; }
 
         body, p, div, span, label {
-            font-family: 'IBM Plex Sans', sans-serif;
+            font-family: 'Inter', sans-serif;
         }
 
         [data-testid="stMetricValue"] {
-            font-family: 'IBM Plex Mono', monospace !important;
-            color: var(--forest) !important;
+            font-family: 'Inter', sans-serif !important;
+            font-weight: 700 !important;
+            color: var(--ink) !important;
         }
         [data-testid="stMetricLabel"] {
-            font-family: 'IBM Plex Mono', monospace !important;
+            font-family: 'Inter', sans-serif !important;
             color: var(--ink-muted) !important;
-            text-transform: uppercase;
-            font-size: 0.75rem !important;
-            letter-spacing: 0.05em;
+            font-size: 0.8rem !important;
         }
 
         div[data-testid="stExpander"],
         div[data-testid="stDataFrame"],
         div[data-testid="stVerticalBlockBorderWrapper"] {
-            background-color: var(--paper-card) !important;
-            border: 1px solid var(--hairline) !important;
-            border-radius: 4px !important;
+            background-color: var(--card) !important;
+            border: 1px solid var(--border) !important;
+            border-radius: 14px !important;
+            box-shadow: 0 1px 3px rgba(16, 24, 40, 0.06);
         }
 
         .stButton > button {
-            font-family: 'IBM Plex Mono', monospace;
-            text-transform: uppercase;
-            font-size: 0.78rem;
-            letter-spacing: 0.04em;
-            background-color: var(--paper-card);
-            color: var(--rust);
-            border: 1.5px solid var(--rust);
-            border-radius: 3px;
-            padding: 0.4rem 0.9rem;
+            font-family: 'Inter', sans-serif;
+            font-weight: 600;
+            font-size: 0.85rem;
+            background-color: var(--blue);
+            color: #FFFFFF;
+            border: none;
+            border-radius: 8px;
+            padding: 0.45rem 1rem;
+            box-shadow: 0 1px 2px rgba(16, 24, 40, 0.08);
         }
         .stButton > button:hover {
-            background-color: var(--rust);
-            color: var(--paper-card);
-            border-color: var(--rust);
+            background-color: #2563EB;
+            color: #FFFFFF;
         }
         .stButton > button:focus:not(:active) {
-            outline: 2px solid var(--forest);
-            outline-offset: 1px;
-        }
-        .stButton > button[kind="primary"] {
-            background-color: var(--forest);
-            color: var(--paper-card);
-            border-color: var(--forest);
+            outline: 2px solid var(--blue);
+            outline-offset: 2px;
         }
 
         hr, div[data-testid="stDivider"] {
-            border-top: 1px dashed var(--hairline) !important;
+            border-top: 1px solid var(--border) !important;
         }
 
         .stTextInput input, .stTextArea textarea,
         .stSelectbox div[data-baseweb="select"] {
-            background-color: var(--paper-card) !important;
-            border: 1px solid var(--hairline) !important;
+            background-color: var(--card) !important;
+            border: 1px solid var(--border) !important;
+            border-radius: 8px !important;
             color: var(--ink) !important;
-            font-family: 'IBM Plex Sans', sans-serif;
+            font-family: 'Inter', sans-serif;
         }
 
         [data-testid="stCaptionContainer"] {
-            font-family: 'IBM Plex Mono', monospace !important;
+            font-family: 'Inter', sans-serif !important;
             color: var(--ink-muted) !important;
         }
         </style>
@@ -197,28 +191,64 @@ def inject_theme():
 
 
 def page_stamp(label: str):
-    """Renders the small 'LOG · <page>' chip at the top of a page —
-    the one signature flourish of the Field Notebook theme, styled
-    like a case-file tag."""
+    """Renders a small colored pill with the page name at the top of
+    a page, in the Solar Admin theme's blue accent."""
     st.markdown(
         f"""
         <div style="
             display:inline-block;
-            font-family:'IBM Plex Mono', monospace;
+            font-family:'Inter', sans-serif;
             font-size:0.72rem;
-            letter-spacing:0.08em;
+            font-weight:600;
+            letter-spacing:0.03em;
             text-transform:uppercase;
-            color:#A54C28;
-            border:1.5px solid #A54C28;
-            border-radius:3px;
-            padding:2px 10px;
+            color:#3B82F6;
+            background-color:#EFF6FF;
+            border-radius:20px;
+            padding:4px 14px;
             margin-bottom:0.6rem;
         ">
-            Log · {label}
+            {label}
         </div>
         """,
         unsafe_allow_html=True,
     )
+
+
+def plot_gauge(value, max_value, title, unit="", color="#3B82F6"):
+    """Builds a Plotly speedometer-style gauge (mode='gauge+number')
+    for a single live metric — e.g. current irradiance or panel power.
+    Bands the gauge track into low/moderate/high thirds like a
+    typical dashboard gauge, colored in `color`."""
+    import plotly.graph_objects as go
+
+    third = max_value / 3
+    fig = go.Figure(
+        go.Indicator(
+            mode="gauge+number",
+            value=value,
+            number={"suffix": f" {unit}", "font": {"size": 28}},
+            title={"text": title, "font": {"size": 15}},
+            gauge={
+                "axis": {"range": [0, max_value]},
+                "bar": {"color": color},
+                "bgcolor": "white",
+                "borderwidth": 0,
+                "steps": [
+                    {"range": [0, third], "color": "#FEE2E2"},
+                    {"range": [third, third * 2], "color": "#FEF3C7"},
+                    {"range": [third * 2, max_value], "color": "#DCFCE7"},
+                ],
+            },
+        )
+    )
+    fig.update_layout(
+        height=220,
+        margin=dict(l=20, r=20, t=40, b=10),
+        paper_bgcolor="rgba(0,0,0,0)",
+        font={"family": "Inter, sans-serif", "color": "#1F2937"},
+    )
+    return fig
 
 
 # =========================
