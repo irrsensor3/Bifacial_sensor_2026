@@ -13,6 +13,8 @@ from drive_fetch import (
     list_available_csvs,
     download_and_combine_csvs,
     extract_year,
+    extract_month,
+    month_label,
     list_available_dcm_csvs,
     download_and_combine_dcm_csvs,
 )
@@ -76,19 +78,28 @@ def render_live_monitoring():
                 st.caption("No Drive CSVs found to append.")
             else:
                 years = sorted({extract_year(f) for f in available_files}, reverse=True)
-                append_year = st.selectbox("Year to append", years, index=0, key="live_append_year_select")
+                yr_col, mo_col = st.columns(2)
+                with yr_col:
+                    append_year = st.selectbox("Year to append", years, index=0, key="live_append_year_select")
                 year_files = [f for f in available_files if extract_year(f) == append_year]
-                st.caption(f"{len(year_files)} file(s) found for {append_year}")
+                months = sorted({extract_month(f) for f in year_files})
+                with mo_col:
+                    append_month = st.selectbox(
+                        "Month to append", months, index=len(months) - 1,
+                        format_func=month_label, key="live_append_month_select",
+                    )
+                period_files = [f for f in year_files if extract_month(f) == append_month]
+                st.caption(f"{len(period_files)} file(s) found for {month_label(append_month)} {append_year}")
 
                 btn_col, remove_col = st.columns(2)
                 with btn_col:
                     if st.button("📥 Append to graph", key="append_year_btn"):
-                        file_ids = tuple(f["id"] for f in year_files)
-                        with st.spinner(f"Downloading {len(file_ids)} file(s) for {append_year}..."):
+                        file_ids = tuple(f["id"] for f in period_files)
+                        with st.spinner(f"Downloading {len(file_ids)} file(s) for {month_label(append_month)} {append_year}..."):
                             df_hist = download_and_combine_csvs(file_ids)
                         st.session_state["_live_append_df"] = df_hist
-                        st.session_state["_live_append_year"] = append_year
-                        st.success(f"Appended {df_hist.shape[0]} rows from {append_year}")
+                        st.session_state["_live_append_year"] = f"{month_label(append_month)} {append_year}"
+                        st.success(f"Appended {df_hist.shape[0]} rows from {month_label(append_month)} {append_year}")
                 with remove_col:
                     if st.session_state.get("_live_append_df") is not None:
                         if st.button("✖️ Remove appended data", key="remove_append_btn"):
@@ -220,21 +231,30 @@ def render_live_monitoring():
                         st.code(st.session_state["_dcm_drive_list_error"])
             else:
                 dcm_years = sorted({extract_year(f) for f in available_dcm_files}, reverse=True)
-                append_dcm_year = st.selectbox(
-                    "Year to append", dcm_years, index=0, key="dcm_append_year_select"
-                )
+                dcm_yr_col, dcm_mo_col = st.columns(2)
+                with dcm_yr_col:
+                    append_dcm_year = st.selectbox(
+                        "Year to append", dcm_years, index=0, key="dcm_append_year_select"
+                    )
                 dcm_year_files = [f for f in available_dcm_files if extract_year(f) == append_dcm_year]
-                st.caption(f"{len(dcm_year_files)} file(s) found for {append_dcm_year}")
+                dcm_months = sorted({extract_month(f) for f in dcm_year_files})
+                with dcm_mo_col:
+                    append_dcm_month = st.selectbox(
+                        "Month to append", dcm_months, index=len(dcm_months) - 1,
+                        format_func=month_label, key="dcm_append_month_select",
+                    )
+                dcm_period_files = [f for f in dcm_year_files if extract_month(f) == append_dcm_month]
+                st.caption(f"{len(dcm_period_files)} file(s) found for {month_label(append_dcm_month)} {append_dcm_year}")
 
                 dcm_btn_col, dcm_remove_col = st.columns(2)
                 with dcm_btn_col:
                     if st.button("📥 Append to graph", key="append_dcm_year_btn"):
-                        file_ids = tuple(f["id"] for f in dcm_year_files)
-                        with st.spinner(f"Downloading {len(file_ids)} file(s) for {append_dcm_year}..."):
+                        file_ids = tuple(f["id"] for f in dcm_period_files)
+                        with st.spinner(f"Downloading {len(file_ids)} file(s) for {month_label(append_dcm_month)} {append_dcm_year}..."):
                             df_dcm_hist = download_and_combine_dcm_csvs(file_ids)
                         st.session_state["_live_append_dcm_df"] = df_dcm_hist
-                        st.session_state["_live_append_dcm_year"] = append_dcm_year
-                        st.success(f"Appended {df_dcm_hist.shape[0]} rows from {append_dcm_year}")
+                        st.session_state["_live_append_dcm_year"] = f"{month_label(append_dcm_month)} {append_dcm_year}"
+                        st.success(f"Appended {df_dcm_hist.shape[0]} rows from {month_label(append_dcm_month)} {append_dcm_year}")
                 with dcm_remove_col:
                     if st.session_state.get("_live_append_dcm_df") is not None:
                         if st.button("✖️ Remove appended data", key="remove_dcm_append_btn"):
