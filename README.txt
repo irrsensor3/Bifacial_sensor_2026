@@ -1,64 +1,337 @@
-Bifacial_sensor_2026
+# Bifacial_sensor_2026
 
-Project description
--------------------
-This repository contains a Streamlit-based tool for working with bifacial sensor data (IRR sensor project). The app provides data loading, visualization, and export functionality (DOCX and PDF reports). It uses Supabase for any backend or storage integration where configured.
+A Streamlit application for working with bifacial sensor data (IRR sensors). The app provides data ingestion from Supabase, live monitoring, data visualization, reporting (DOCX & PDF), and admin controls for device/sensor settings.
 
-Requirements
-------------
-The project dependencies are listed in requirements.txt. To install them into your environment run:
+---
 
-    pip install -r requirements.txt
+Table of contents
+- [Project overview](#project-overview)
+- [Features](#features)
+- [Repository layout](#repository-layout)
+- [Requirements](#requirements)
+- [Quick start](#quick-start)
+- [Configuration (Supabase & secrets)](#configuration-supabase--secrets)
+- [Recommended Supabase schema (example SQL)](#recommended-supabase-schema-example-sql)
+- [Running locally](#running-locally)
+- [Docker (optional)](#docker-optional)
+- [Deployment](#deployment)
+- [App usage and pages](#app-usage-and-pages)
+- [Security notes](#security-notes)
+- [Debugging & troubleshooting](#debugging--troubleshooting)
+- [Development notes & suggestions](#development-notes--suggestions)
+- [Contributing](#contributing)
+- [License](#license)
+- [Contact](#contact)
 
-Running the app
----------------
-Start the Streamlit app with:
+---
 
-    streamlit run <app_file.py>
+## Project overview
 
-Replace <app_file.py> with the actual Streamlit entrypoint file (for example, app.py or streamlit_app.py). If you're not sure which file to use, look for Python files that contain `streamlit` imports.
+This repo contains a Streamlit-based tool to visualize, monitor, and report bifacial sensor data (irradiance and related signals). It integrates with Supabase for storing readings, panel metrics, alerts, and configuration. Users can preview and export reports (DOCX / PDF) and view live time-series. There is a simple authentication UI with "Admin" and "Guest" roles.
 
-Configuration
--------------
-- If the project uses Supabase, set the following environment variables (example names; check the code for exact names):
+Key files
+- `app.py` — Streamlit entrypoint and navigation.
+- `ui_sections.py` — theme, auth helpers, plotting & report-generation utilities, Supabase client and fetchers.
+- `Data_and_Reports.py` — (data processing & report UI; present in repo)
+- `Live_Monitoring.py` — (live monitoring UI; present in repo)
+- `Admin_Controls.py` — (admin UI; present in repo)
+- `Irradiance_Tracker.py` — (irradiance-specific pages; present in repo)
+- `requirements.txt` — Python dependencies.
+- `README.txt` — short project notes (this file expands that into a full README).
 
-    SUPABASE_URL=<your-supabase-url>
-    SUPABASE_KEY=<your-service-role-or-anon-key>
+---
 
-- Any other configuration values (paths, API keys) should be set either in environment variables, a .env file, or edited in a config file if present.
+## Features
 
-Data
-----
-- Place dataset files in a `data/` directory or point the app to your data source via the app UI or config.
-- Supported exports: DOCX (via python-docx) and PDF (via fpdf2).
+- Authentication with Admin / Guest flows.
+- Custom "Field Notebook" theme (CSS injected on startup).
+- Live sensor readings pulled from Supabase (cached at short TTL).
+- Panel readings and alert fetching.
+- Plotting utilities using matplotlib.
+- Report generation:
+  - DOCX via python-docx
+  - PDF via fpdf2 (images embedded from matplotlib)
+- Admin toggles for forcing sensors to log even below sub-zero cutoffs (stored in Supabase settings).
+- Exportable metadata and numeric summaries.
 
-Development notes
------------------
-- The repository already includes a requirements.txt listing key libraries such as streamlit, pandas, matplotlib, python-docx, fpdf2, supabase, and streamlit-autorefresh.
-- Use a virtual environment to avoid dependency conflicts:
+---
 
-    python -m venv .venv
-    source .venv/bin/activate  # macOS/Linux
-    .venv\Scripts\activate     # Windows
-    pip install -r requirements.txt
+## Repository layout
 
-Contributing
-------------
-Contributions are welcome. Recommended workflow:
+(approximate — adjust if files moved)
 
-1. Fork the repository
-2. Create a feature branch
-3. Commit and push changes
-4. Open a pull request describing the change
+- app.py
+- ui_sections.py
+- Data_and_Reports.py
+- Live_Monitoring.py
+- Admin_Controls.py
+- Irradiance_Tracker.py
+- requirements.txt
+- README.md (this file)
+- data/ (optional local data)
+- .streamlit/ (optional streamlit config)
 
-License
--------
-Add a LICENSE file to this repository to indicate the intended license. If you don't have one yet, consider using MIT or Apache-2.0.
+---
 
-Contact
--------
-For questions, contact the repository owner: irrsensor3 (GitHub user).
+## Requirements
 
-Notes
------
-- If you'd like, I can also create README.md (Markdown) instead, or include more detailed run examples after you point me to the actual Streamlit app filename or other entrypoints.
+Install dependencies using:
+
+```bash
+python -m venv .venv
+source .venv/bin/activate    # macOS / Linux
+# .venv\Scripts\activate     # Windows (PowerShell)
+pip install -r requirements.txt
+```
+
+Core Python libraries used:
+- streamlit
+- pandas
+- matplotlib
+- python-docx
+- fpdf2
+- supabase (supabase-py)
+- streamlit-autorefresh (if present)
+- other standard libraries: tempfile, io, datetime, hashlib, os
+
+---
+
+## Quick start
+
+1. Create and activate a virtual environment (see above).
+2. Add required secrets (see next section).
+3. Run the app:
+```bash
+streamlit run app.py
+```
+Open the displayed URL (by default http://localhost:8501).
+
+---
+
+## Configuration (Supabase & secrets)
+
+The app references Supabase via `st.secrets["SUPABASE_URL"]` and `st.secrets["SUPABASE_KEY"]` in `ui_sections.py`. Provide these either through Streamlit secrets or environment variables depending on how you run Streamlit.
+
+Streamlit secrets file: `.streamlit/secrets.toml` example:
+
+```toml
+SUPABASE_URL = "https://your-project.supabase.co"
+SUPABASE_KEY = "your-supabase-key"
+# Optionally any other secrets such as admin password (if desired)
+```
+
+Security recommendations:
+- DO NOT commit keys to source control.
+- Use the Supabase anon key (for client operations) with Row Level Security enabled, or create a secure server-side proxy for privileged operations.
+- Never expose the Supabase `service_role` key in a browser-accessible app. If the app uses privileged operations, run those server-side only.
+
+---
+
+## Recommended Supabase schema (example SQL)
+
+Below are suggested table structures based on how `ui_sections.py` accesses Supabase. Adjust types and constraints to match your ingestion pipeline.
+
+1) sensor_readings
+```sql
+CREATE TABLE public.sensor_readings (
+  id bigint GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+  created_at timestamptz DEFAULT now(),
+  date text,           -- optional date string used in reports
+  time text,           -- optional time string used in reports
+  readings jsonb       -- JSON object with keys like "sensor_1": 123, "sensor_2": 456, ...
+);
+```
+
+2) panel_readings
+```sql
+CREATE TABLE public.panel_readings (
+  id bigint GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+  created_at timestamptz DEFAULT now(),
+  panel_id text,
+  measurements jsonb   -- e.g. {"voc": ..., "isc": ..., "power": ...}
+);
+```
+
+3) sensor_alerts
+```sql
+CREATE TABLE public.sensor_alerts (
+  id bigint GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+  created_at timestamptz DEFAULT now(),
+  sensor_id text,
+  level text,          -- e.g. "warning", "critical"
+  message text,
+  metadata jsonb
+);
+```
+
+4) pi_settings
+```sql
+CREATE TABLE public.pi_settings (
+  id integer PRIMARY KEY,
+  force_log_sensors jsonb DEFAULT '[]'::jsonb  -- array of sensor IDs to force logging
+);
+-- Insert default settings row:
+INSERT INTO public.pi_settings (id, force_log_sensors) VALUES (1, '[]');
+```
+
+Notes:
+- The app expects `pi_settings` to have a row with `id = 1`.
+- `sensor_readings.readings` is expanded into dataframe columns in the app (so key names become columns).
+
+---
+
+## Running locally
+
+1. Ensure `.streamlit/secrets.toml` contains the Supabase values (or set env vars and load them into st.secrets).
+2. Install dependencies (see Requirements).
+3. Start Streamlit:
+```bash
+streamlit run app.py
+```
+4. Use the login page to access the app:
+- Admin: App currently validates a password using a salted hash in `ui_sections.py`. Change this before production.
+- Guest: No password required.
+
+---
+
+## Docker (optional)
+
+Example Dockerfile for running the app in a container:
+
+```dockerfile
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Install dependencies
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy application
+COPY . .
+
+# Use a non-root user (optional)
+ENV PYTHONUNBUFFERED=1
+
+# Ensure fonts backend for matplotlib when running headless
+ENV MPLBACKEND=Agg
+
+EXPOSE 8501
+CMD ["streamlit", "run", "app.py", "--server.port=8501", "--server.address=0.0.0.0"]
+```
+
+Build and run:
+```bash
+docker build -t bifacial-sensor-app .
+docker run -e SUPABASE_URL="..." -e SUPABASE_KEY="..." -p 8501:8501 bifacial-sensor-app
+```
+
+If you prefer docker-compose, add a service and pass secrets as environment variables or mounted files.
+
+---
+
+## Deployment
+
+- Streamlit Community Cloud: add repo and set secrets in the web UI (recommended for quick sharing).
+- VPS / Docker: run using the Dockerfile above.
+- Use a reverse proxy (nginx) with TLS if exposing publicly.
+
+---
+
+## App usage and pages
+
+The app uses `st.navigation` and provides these pages (see `app.py`):
+- Data & Reports — load datasets, generate previews, export DOCX/PDF.
+- Live Monitoring — shows live readings and time series from Supabase.
+- Irradiance Tracker — specialized irradiance graphs and frequency histograms.
+- Admin Controls — only visible to admin role (toggle sensor force options, settings).
+
+Important behaviors:
+- `ui_sections.inject_theme()` injects CSS to style the entire app.
+- Authentication is stored in `st.session_state` as `auth` and `user_role`.
+- When not authenticated, the app stops at the login screen (Streamlit `st.stop()`), preventing access to navigation.
+- The admin password uses a salted hash in `ui_sections.py` — change this to a secure user management system for production.
+
+---
+
+## Report generation
+
+- Word (DOCX) via python-docx — `generate_word_report()` returns an in-memory BytesIO buffer.
+- PDF via fpdf2 — `generate_pdf_report()` returns bytes.
+
+Both functions use `build_report_data()` to create a consistent metadata and numeric summary. Matplotlib figures are converted to PNG and embedded into the documents.
+
+Be aware:
+- Large figures can increase PDF size.
+- For headless servers or Docker, ensure Matplotlib backend `Agg` is used (ENV MPLBACKEND=Agg or set in code).
+
+---
+
+## Security notes
+
+- Change the default admin password and SALT in `ui_sections.py` before any public deployment. Better: replace with OAuth or an external auth provider.
+- Do not store or publish Supabase `service_role` keys in client-side apps. Use RLS (Row Level Security) and the anon key when appropriate, or route privileged operations through a backend.
+- Sanitize and validate any user-provided inputs that may be written to your database.
+
+---
+
+## Debugging & troubleshooting
+
+Common issues and fixes:
+- "KeyError: SUPABASE_URL" or missing key: ensure `.streamlit/secrets.toml` is present and Streamlit is loading it, or set environment variables and map them into st.secrets when running (Streamlit uses secrets automatically when a secrets.toml exists in `.streamlit`).
+- Matplotlib errors in Docker: set MPLBACKEND=Agg or use `matplotlib.use("Agg")` before importing pyplot.
+- Fonts not loading (Google fonts blocked): fallback styling still works; app will use system fonts.
+- Large JSON loading slowness: increase Supabase query limits and implement pagination/filters in the UI; consider pre-aggregating data server-side.
+- PDF generation issues on servers: ensure temporary files can be created and deleted; the code uses tempfile and then removes the file.
+
+If Supabase fetches return empty DataFrames, verify:
+- Tables exist and have rows.
+- The keys/column names match expectations (`created_at`, `readings`).
+- The Supabase user has permissions to SELECT.
+
+---
+
+## Development notes & suggestions (recommended improvements)
+
+- Replace the simple password check with a proper authentication flow:
+  - Streamlit + OAuth (GitHub, Google) or
+  - Server-side auth + role-based access with session tokens.
+- Avoid in-file SALT & hard-coded password. Move admin credentials to secrets or external auth.
+- Provide a configuration module or .env parsing for non-Supabase settings.
+- Add unit/integration tests for data processing functions (e.g. report builders, plot functions).
+- Add a CI pipeline (GitHub Actions) to run linting and tests.
+- Add more robust error reporting/metrics (Sentry or similar).
+- Improve error handling around Supabase calls and surface actionable messages in the UI.
+- Escape or validate long column lists used in PDF rendering to avoid layout overflow.
+
+---
+
+## Contributing
+
+1. Fork the repository.
+2. Create a feature branch: `git checkout -b feat/your-feature`.
+3. Make changes and commit with clear messages.
+4. Push to your fork and open a pull request describing the changes.
+
+Please open issues for bug reports or feature requests.
+
+---
+
+## License
+
+Add a LICENSE file to indicate desired license (MIT or Apache-2.0 recommended for most projects). Example:
+```text
+MIT License
+```
+
+---
+
+## Contact
+
+Repository owner: `irrsensor3` (GitHub user)
+
+If you'd like, I can:
+- convert this README into the repository file,
+- create starter `.streamlit/secrets.toml.example`,
+- create a Docker Compose example or CI workflow,
+- or draft the SQL migration files for the Supabase schema above.
