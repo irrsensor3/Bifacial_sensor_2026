@@ -9,6 +9,7 @@ from ui_sections import (
     fetch_recent_alerts,
     fetch_latest_panel_readings,
 )
+from drive_fetch import list_available_csvs, download_and_combine_csvs, extract_year
 
 
 def render_live_monitoring():
@@ -60,6 +61,39 @@ def render_live_monitoring():
             if st.button("Remove all", key="live_irr_remove_all", use_container_width=True):
                 st.session_state.selected_live_irr = []
 
+        # -------------------------
+        # Append historical Drive data onto this same chart
+        # -------------------------
+        with st.expander("🗄️ Append historical data from Drive"):
+            available_files = list_available_csvs()
+            if not available_files:
+                st.caption("No Drive CSVs found to append.")
+            else:
+                years = sorted({extract_year(f) for f in available_files}, reverse=True)
+                append_year = st.selectbox("Year to append", years, index=0, key="live_append_year_select")
+                year_files = [f for f in available_files if extract_year(f) == append_year]
+                st.caption(f"{len(year_files)} file(s) found for {append_year}")
+
+                btn_col, remove_col = st.columns(2)
+                with btn_col:
+                    if st.button("📥 Append to graph", key="append_year_btn"):
+                        file_ids = tuple(f["id"] for f in year_files)
+                        with st.spinner(f"Downloading {len(file_ids)} file(s) for {append_year}..."):
+                            df_hist = download_and_combine_csvs(file_ids)
+                        st.session_state["_live_append_df"] = df_hist
+                        st.session_state["_live_append_year"] = append_year
+                        st.success(f"Appended {df_hist.shape[0]} rows from {append_year}")
+                with remove_col:
+                    if st.session_state.get("_live_append_df") is not None:
+                        if st.button("✖️ Remove appended data", key="remove_append_btn"):
+                            st.session_state["_live_append_df"] = None
+                            st.session_state["_live_append_year"] = None
+                            st.rerun()
+
+                appended_year = st.session_state.get("_live_append_year")
+                if appended_year:
+                    st.caption(f"Currently appended: {appended_year}")
+
         selected_live_irr = st.multiselect(
             "Irradiance sensors to plot (live)",
             irr_cols,
@@ -67,7 +101,39 @@ def render_live_monitoring():
             label_visibility="collapsed",
         )
         if selected_live_irr:
-            st.line_chart(df_live.set_index("created_at")[selected_live_irr])
+            # start with the live data on a proper datetime x-axis
+            combined = df_live[["created_at"] + selected_live_irr].copy()
+            combined["created_at"] = pd.to_datetime(combined["created_at"])
+
+            df_hist = st.session_state.get("_live_append_df")
+            if df_hist is not None and not df_hist.empty:
+                hist = df_hist.copy()
+                # build a matching timestamp column from whatever
+                # Date/Time columns the historical CSV has
+                if "Date" in hist.columns and "Time" in hist.columns:
+                    hist["created_at"] = pd.to_datetime(
+                        hist["Date"].astype(str) + " " + hist["Time"].astype(str),
+                        errors="coerce",
+                    )
+                elif "Time" in hist.columns:
+                    hist["created_at"] = pd.to_datetime(hist["Time"], errors="coerce")
+                else:
+                    hist["created_at"] = pd.NaT
+
+                # a sensor selected live might not exist in the
+                # historical file (e.g. it was added later) — fill
+                # those with NaN so the columns still line up
+                for c in selected_live_irr:
+                    if c not in hist.columns:
+                        hist[c] = pd.NA
+
+                hist_slice = hist[["created_at"] + selected_live_irr]
+                combined = pd.concat([hist_slice, combined], ignore_index=True)
+
+            combined = combined.dropna(subset=["created_at"]).sort_values("created_at")
+            # a longer combined time range naturally compresses onto the
+            # same chart width — nothing extra needed for that
+            st.line_chart(combined.set_index("created_at")[selected_live_irr])
 
         with st.expander("Raw live data table"):
             st.dataframe(df_live, use_container_width=True, hide_index=True)
