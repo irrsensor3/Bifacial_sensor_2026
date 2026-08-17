@@ -251,6 +251,34 @@ def plot_gauge(value, max_value, title, unit="", color="#3B82F6"):
     return fig
 
 
+def plot_line_chart(df, x_col, y_cols, x_range=None, y_range=None, y_title=""):
+    """Multi-line Plotly chart (replaces st.line_chart for the Live
+    Monitoring charts) so the axes can be forced to explicit
+    min/max values instead of only auto-scaling. x_range/y_range are
+    optional (min, max) tuples — pass None to leave that axis on
+    autoscale."""
+    import plotly.graph_objects as go
+
+    fig = go.Figure()
+    for col in y_cols:
+        fig.add_trace(go.Scatter(x=df[x_col], y=df[col], mode="lines", name=str(col)))
+
+    fig.update_layout(
+        height=380,
+        margin=dict(l=20, r=20, t=20, b=20),
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        font={"family": "Inter, sans-serif", "color": "#1F2937"},
+        legend={"orientation": "h", "y": -0.2},
+        yaxis_title=y_title,
+    )
+    if x_range is not None:
+        fig.update_xaxes(range=list(x_range))
+    if y_range is not None:
+        fig.update_yaxes(range=list(y_range))
+    return fig
+
+
 # =========================
 # PLOTTING HELPERS
 # =========================
@@ -262,7 +290,7 @@ def fig_to_image_bytes(fig):
     return buf
 
 
-def plot_weather_signals(time, temperatures, irradiances, title="Weather Data"):
+def plot_weather_signals(time, temperatures, irradiances, title="Weather Data", temp_ylim=None, irr_ylim=None):
     # A blank/missing cell in the Time column reads as NaN (a float),
     # which crashes matplotlib's categorical x-axis if it's mixed in
     # with real time strings. pandas' Series.astype(str) doesn't
@@ -277,6 +305,8 @@ def plot_weather_signals(time, temperatures, irradiances, title="Weather Data"):
 
     ax1.set_xlabel("Time")
     ax1.set_ylabel("Temperature (°C)")
+    if temp_ylim is not None:
+        ax1.set_ylim(temp_ylim)
 
     ax2 = ax1.twinx()
 
@@ -284,6 +314,8 @@ def plot_weather_signals(time, temperatures, irradiances, title="Weather Data"):
         ax2.plot(time, irr_values, linestyle="--", label=str(label))
 
     ax2.set_ylabel("Irradiance (W/m²)")
+    if irr_ylim is not None:
+        ax2.set_ylim(irr_ylim)
 
     plt.title(title)
 
