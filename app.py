@@ -103,8 +103,8 @@ with gauge_col:
 
 with photo_col:
     st.image(
-        "https://commons.wikimedia.org/wiki/Special:FilePath/Solar_roof.jpg",
-        caption="Rooftop solar array (stock photo — swap in your own site photo anytime)",
+        "BifacialGrid.jpeg",
+        caption="Bifacial solar grid array",
         use_container_width=True,
     )
 
