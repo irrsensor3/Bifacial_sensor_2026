@@ -175,7 +175,39 @@ def render_data_reports():
         irradiances = {col: df[col].tolist() for col in selected_irradiance}
 
         if selected_temps or selected_irradiance:
-            fig = plot_weather_signals(time, temperatures, irradiances)
+            with st.expander("📐 Chart scale (optional)"):
+                st.caption(
+                    "Time is a categorical axis here, so the X range trims "
+                    "which rows are plotted rather than setting numeric bounds."
+                )
+                n_rows = len(time)
+                x_start, x_end = st.slider(
+                    "X range (row index)", 0, n_rows - 1, (0, n_rows - 1)
+                )
+
+                temp_y_col, irr_y_col = st.columns(2)
+                with temp_y_col:
+                    st.caption("Temperature Y-axis (°C)")
+                    temp_auto = st.checkbox("Auto", value=True, key="temp_y_auto")
+                    temp_y_min = st.number_input("Min", value=0.0, key="temp_y_min", disabled=temp_auto)
+                    temp_y_max = st.number_input("Max", value=50.0, key="temp_y_max", disabled=temp_auto)
+                with irr_y_col:
+                    st.caption("Irradiance Y-axis (W/m²)")
+                    irr_auto = st.checkbox("Auto", value=True, key="irr_y_auto")
+                    irr_y_min = st.number_input("Min", value=0.0, key="irr_y_min", disabled=irr_auto)
+                    irr_y_max = st.number_input("Max", value=1200.0, key="irr_y_max", disabled=irr_auto)
+
+            sliced_time = time[x_start:x_end + 1]
+            sliced_temps = {col: vals[x_start:x_end + 1] for col, vals in temperatures.items()}
+            sliced_irr = {col: vals[x_start:x_end + 1] for col, vals in irradiances.items()}
+
+            fig = plot_weather_signals(
+                sliced_time,
+                sliced_temps,
+                sliced_irr,
+                temp_ylim=None if temp_auto else (temp_y_min, temp_y_max),
+                irr_ylim=None if irr_auto else (irr_y_min, irr_y_max),
+            )
             st.pyplot(fig)
 
             st.subheader("📄 Generate Reports")
