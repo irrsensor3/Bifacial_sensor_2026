@@ -5,6 +5,7 @@ from streamlit_autorefresh import st_autorefresh
 from ui_sections import (
     require_login,
     page_stamp,
+    plot_line_chart,
     fetch_latest_readings,
     fetch_recent_alerts,
     fetch_latest_panel_readings,
@@ -148,9 +149,33 @@ def render_live_monitoring():
                 combined = pd.concat([hist_slice, combined], ignore_index=True)
 
             combined = combined.dropna(subset=["created_at"]).sort_values("created_at")
-            # a longer combined time range naturally compresses onto the
-            # same chart width — nothing extra needed for that
-            st.line_chart(combined.set_index("created_at")[selected_live_irr])
+
+            with st.expander("📐 Chart scale (optional)"):
+                data_min_t = combined["created_at"].min().to_pydatetime()
+                data_max_t = combined["created_at"].max().to_pydatetime()
+                if data_min_t < data_max_t:
+                    x_start_t, x_end_t = st.slider(
+                        "X range (time)", min_value=data_min_t, max_value=data_max_t,
+                        value=(data_min_t, data_max_t), key="live_irr_x_range",
+                    )
+                else:
+                    st.caption("Only one timestamp in range — X range slider needs more data.")
+                    x_start_t, x_end_t = data_min_t, data_max_t
+
+                irr_chart_auto = st.checkbox("Auto Y-axis", value=True, key="live_irr_y_auto")
+                y_min_col, y_max_col = st.columns(2)
+                with y_min_col:
+                    irr_chart_ymin = st.number_input("Y min (W/m²)", value=0.0, key="live_irr_ymin", disabled=irr_chart_auto)
+                with y_max_col:
+                    irr_chart_ymax = st.number_input("Y max (W/m²)", value=1200.0, key="live_irr_ymax", disabled=irr_chart_auto)
+
+            fig = plot_line_chart(
+                combined, "created_at", selected_live_irr,
+                x_range=(x_start_t, x_end_t),
+                y_range=None if irr_chart_auto else (irr_chart_ymin, irr_chart_ymax),
+                y_title="Irradiance (W/m²)",
+            )
+            st.plotly_chart(fig, use_container_width=True)
 
         with st.expander("Raw live data table"):
             st.dataframe(df_live, use_container_width=True, hide_index=True)
@@ -316,7 +341,41 @@ def render_live_monitoring():
                 index="created_at", columns="device_id", values=metric_choice
             )
             pivot.columns = [f"Meter {int(c)}" for c in pivot.columns]
-            st.line_chart(pivot)
+            pivot_reset = pivot.reset_index()
+            meter_cols = [c for c in pivot_reset.columns if c != "created_at"]
+
+            with st.expander("📐 Chart scale (optional)"):
+                data_min_t = pivot_reset["created_at"].min().to_pydatetime()
+                data_max_t = pivot_reset["created_at"].max().to_pydatetime()
+                if data_min_t < data_max_t:
+                    dcm_x_start, dcm_x_end = st.slider(
+                        "X range (time)", min_value=data_min_t, max_value=data_max_t,
+                        value=(data_min_t, data_max_t), key="dcm_trend_x_range",
+                    )
+                else:
+                    st.caption("Only one timestamp in range — X range slider needs more data.")
+                    dcm_x_start, dcm_x_end = data_min_t, data_max_t
+
+                dcm_chart_auto = st.checkbox("Auto Y-axis", value=True, key="dcm_trend_y_auto")
+                default_min = float(pivot[meter_cols].min(numeric_only=True).min()) if not pivot.empty else 0.0
+                default_max = float(pivot[meter_cols].max(numeric_only=True).max()) if not pivot.empty else 1.0
+                dcm_y_min_col, dcm_y_max_col = st.columns(2)
+                with dcm_y_min_col:
+                    dcm_chart_ymin = st.number_input("Y min", value=default_min, key="dcm_trend_ymin", disabled=dcm_chart_auto)
+                with dcm_y_max_col:
+                    dcm_chart_ymax = st.number_input("Y max", value=default_max, key="dcm_trend_ymax", disabled=dcm_chart_auto)
+
+            metric_axis_label = {
+                "voltage_v": "Voltage (V)", "current_a": "Current (A)", "active_power_kw": "Power (kW)",
+            }[metric_choice]
+
+            dcm_fig = plot_line_chart(
+                pivot_reset, "created_at", meter_cols,
+                x_range=(dcm_x_start, dcm_x_end),
+                y_range=None if dcm_chart_auto else (dcm_chart_ymin, dcm_chart_ymax),
+                y_title=metric_axis_label,
+            )
+            st.plotly_chart(dcm_fig, use_container_width=True)
 
         with st.expander("Raw panel meter data table"):
             st.dataframe(df_panel, use_container_width=True, hide_index=True)
