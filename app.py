@@ -12,6 +12,7 @@ from Data_and_Reports import render_data_reports
 from Live_Monitoring import render_live_monitoring
 from Admin_Controls import render_admin_controls
 from Irradiance_Tracker import render_irradiance_tracker
+from Panel_Array import render_panel_array
 
 MAX_IRRADIANCE = 1200  # W/m², matches Irradiance_Tracker.py
 PANEL_CAPACITY_KW = 10  # adjust to your actual inverter/array capacity
@@ -119,6 +120,7 @@ pages = [
     st.Page(render_data_reports, title="Data & Reports", icon="📁"),
     st.Page(render_live_monitoring, title="Live Monitoring", icon="📡"),
     st.Page(render_irradiance_tracker, title="Irradiance Tracker", icon="📈"),
+    st.Page(render_panel_array, title="Panel Array", icon="🔲"),
 ]
 
 if st.session_state.user_role == "admin":
