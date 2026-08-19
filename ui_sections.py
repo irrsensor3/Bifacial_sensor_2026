@@ -5,58 +5,129 @@ from io import BytesIO
 from datetime import datetime
 import os
 import hashlib
+import hmac
+import time
 import matplotlib.pyplot as plt
 from fpdf import FPDF
 import tempfile
 from supabase import create_client
 
-# Create a Supabase client here so other modules can import it from this package
-supabase = create_client(
-    st.secrets["SUPABASE_URL"],
-    st.secrets["SUPABASE_KEY"]
-)
+# Create a Supabase client here so other modules can import it from this package.
+# Missing secrets used to raise a bare KeyError at import time, which Streamlit
+# shows as a stack trace with no indication of what to fix.
+def _require_secret(name: str) -> str:
+    try:
+        return st.secrets[name]
+    except (KeyError, FileNotFoundError):
+        st.error(
+            f"Missing `{name}`. Add it to `.streamlit/secrets.toml` locally, or "
+            f"to the app's secrets in Streamlit Cloud, then reload."
+        )
+        st.stop()
+
+
+supabase = create_client(_require_secret("SUPABASE_URL"),
+                         _require_secret("SUPABASE_KEY"))
 
 # =========================
 # AUTHENTICATION
 # =========================
 
-SALT = "pv_secure_salt_2026"
+# The password lives in secrets, never in the repo. Previously both the salt
+# and the literal password ("admin123") were in this file, which is public --
+# anyone reading it had admin, and admin can reboot and shut down the Pi.
+#
+# Generate the hash once and put it in secrets.toml:
+#     python -c "import hashlib,secrets; s=secrets.token_hex(16); \
+#       print('ADMIN_SALT =', repr(s)); \
+#       print('ADMIN_PASSWORD_HASH =', repr(hashlib.pbkdf2_hmac('sha256', \
+#       b'YOUR-PASSWORD', s.encode(), 200_000).hex()))"
+_PBKDF2_ROUNDS = 200_000
+_LOCKOUT_AFTER = 5
+_LOCKOUT_SECONDS = 300
 
-def hash_password(password: str) -> str:
-    return hashlib.sha256((password + SALT).encode()).hexdigest()
+
+def hash_password(password: str, salt: str) -> str:
+    """PBKDF2 rather than a single SHA-256 pass. A plain hash of a short
+    password is brute-forced in seconds on a laptop; 200k rounds makes each
+    guess cost real time."""
+    return hashlib.pbkdf2_hmac(
+        "sha256", password.encode(), salt.encode(), _PBKDF2_ROUNDS
+    ).hex()
 
 
 def check_password(password: str) -> bool:
-    # Keep the simple hard-coded admin password check for now
-    return hash_password(password) == hash_password("admin123")
+    try:
+        salt = st.secrets["ADMIN_SALT"]
+        expected = st.secrets["ADMIN_PASSWORD_HASH"]
+    except (KeyError, FileNotFoundError):
+        st.error(
+            "Admin login is not configured. Add `ADMIN_SALT` and "
+            "`ADMIN_PASSWORD_HASH` to the app secrets — see the comment in "
+            "ui_sections.py for the one-liner that generates them."
+        )
+        return False
+    # constant-time compare, so response timing does not leak how much of the
+    # hash matched
+    return hmac.compare_digest(hash_password(password, salt), expected)
+
+
+def _login_locked() -> int:
+    """Seconds remaining on the lockout, 0 if not locked."""
+    fails = st.session_state.get("_login_fails", 0)
+    if fails < _LOCKOUT_AFTER:
+        return 0
+    since = time.time() - st.session_state.get("_login_last_fail", 0)
+    return max(0, int(_LOCKOUT_SECONDS - since))
 
 
 def login():
     """Render the login UI and set session state on success."""
-    st.title("🔐 Login")
+    st.title("Bifacial PV logging system")
+    st.caption(
+        "Sign in as a guest to view live data and reports, or as an admin to "
+        "also control the logger."
+    )
 
     col1, col2 = st.columns(2)
 
     with col1:
-        st.subheader("Admin Login")
-        password = st.text_input("Enter Admin Password", type="password", key="admin_pass")
-
-        if st.button("Login as Admin"):
-            if check_password(password):
-                st.session_state.auth = True
-                st.session_state.user_role = "admin"
-                st.success("Admin access granted")
-                st.rerun()
-            else:
-                st.error("Wrong password")
+        with st.container(border=True):
+            st.subheader("Admin")
+            st.caption("Full access, including power controls and sensor settings.")
+            locked = _login_locked()
+            password = st.text_input(
+                "Admin password", type="password", key="admin_pass",
+                disabled=locked > 0,
+            )
+            if st.button("Sign in as admin", disabled=locked > 0,
+                         use_container_width=True):
+                if check_password(password):
+                    st.session_state.auth = True
+                    st.session_state.user_role = "admin"
+                    st.session_state._login_fails = 0
+                    st.rerun()
+                else:
+                    # Throttle guessing. Without this the password can be
+                    # attacked at the speed of the network.
+                    st.session_state._login_fails = st.session_state.get("_login_fails", 0) + 1
+                    st.session_state._login_last_fail = time.time()
+                    left = _LOCKOUT_AFTER - st.session_state._login_fails
+                    if left > 0:
+                        st.error(f"That password did not match. {left} attempt(s) left.")
+                    else:
+                        st.error("Too many attempts. Try again in 5 minutes.")
+            if locked:
+                st.warning(f"Locked for {locked // 60}m {locked % 60}s after too many attempts.")
 
     with col2:
-        st.subheader("Guest Access")
-        if st.button("Login as Guest"):
-            st.session_state.auth = True
-            st.session_state.user_role = "guest"
-            st.success("Guest access granted")
-            st.rerun()
+        with st.container(border=True):
+            st.subheader("Guest")
+            st.caption("View live readings, charts and reports. No password needed.")
+            if st.button("Continue as guest", use_container_width=True):
+                st.session_state.auth = True
+                st.session_state.user_role = "guest"
+                st.rerun()
 
 
 def require_login(role: str | None = None):
@@ -84,56 +155,62 @@ def inject_theme():
     st.markdown(
         """
         <style>
+        /* Inter is loaded if the network allows it, but every rule below names
+           a full fallback stack so the app still looks deliberate offline or
+           where Google Fonts is blocked. */
         @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
 
         :root {
             --bg: #F1F4F9;
             --card: #FFFFFF;
-            --ink: #1F2937;
-            --ink-muted: #6B7280;
-            --blue: #3B82F6;
-            --green: #22C55E;
-            --amber: #F59E0B;
-            --purple: #8B5CF6;
+            --ink: #16202E;
+            /* was #6B7280 on #F1F4F9 = 4.3:1, under the 4.5:1 floor for body
+               text. Darkened to clear WCAG AA at small sizes. */
+            --ink-muted: #55606E;
+            --blue: #2563EB;
+            --blue-soft: #EFF6FF;
+            --green: #15803D;
+            --amber: #B45309;
             --border: #E5E9F0;
+            --focus: #B45309;
+            --font: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI',
+                    Roboto, 'Helvetica Neue', Arial, sans-serif;
         }
 
-        .stApp {
-            background-color: var(--bg);
-            color: var(--ink);
-        }
+        .stApp { background-color: var(--bg); color: var(--ink); }
 
         section[data-testid="stSidebar"] {
             background-color: var(--card);
             border-right: 1px solid var(--border);
         }
         section[data-testid="stSidebar"] * {
-            font-family: 'Inter', sans-serif;
+            font-family: var(--font);
             color: var(--ink) !important;
         }
         section[data-testid="stSidebar"] a[aria-current="page"] {
-            background-color: #EFF6FF;
+            background-color: var(--blue-soft);
             border-left: 3px solid var(--blue);
             border-radius: 6px;
         }
 
         h1, h2, h3 {
-            font-family: 'Inter', sans-serif !important;
+            font-family: var(--font) !important;
             font-weight: 700 !important;
             color: var(--ink) !important;
+            letter-spacing: -0.015em;
         }
-
-        body, p, div, span, label {
-            font-family: 'Inter', sans-serif;
-        }
+        body, p, div, span, label { font-family: var(--font); }
 
         [data-testid="stMetricValue"] {
-            font-family: 'Inter', sans-serif !important;
+            font-family: var(--font) !important;
             font-weight: 700 !important;
             color: var(--ink) !important;
+            /* readings line up column-to-column instead of jittering as
+               digits change */
+            font-variant-numeric: tabular-nums;
         }
         [data-testid="stMetricLabel"] {
-            font-family: 'Inter', sans-serif !important;
+            font-family: var(--font) !important;
             color: var(--ink-muted) !important;
             font-size: 0.8rem !important;
         }
@@ -147,24 +224,46 @@ def inject_theme():
             box-shadow: 0 1px 3px rgba(16, 24, 40, 0.06);
         }
 
+        /* Buttons: base styling only. The previous rule forced EVERY button to
+           the same blue, which silently cancelled Streamlit's primary vs
+           secondary distinction -- so type="primary" had no visible effect
+           anywhere in the app. Secondary buttons are now outlined, primary
+           filled, and the difference survives greyscale. */
         .stButton > button {
-            font-family: 'Inter', sans-serif;
+            font-family: var(--font);
             font-weight: 600;
-            font-size: 0.85rem;
-            background-color: var(--blue);
-            color: #FFFFFF;
-            border: none;
+            font-size: 0.875rem;
             border-radius: 8px;
-            padding: 0.45rem 1rem;
+            padding: 0.5rem 1rem;
+            min-height: 2.5rem;
             box-shadow: 0 1px 2px rgba(16, 24, 40, 0.08);
         }
-        .stButton > button:hover {
-            background-color: #2563EB;
+        .stButton > button[kind="primary"] {
+            background-color: var(--blue);
             color: #FFFFFF;
+            border: 1px solid var(--blue);
         }
-        .stButton > button:focus:not(:active) {
-            outline: 2px solid var(--blue);
-            outline-offset: 2px;
+        .stButton > button[kind="primary"]:hover {
+            background-color: #1D4ED8; border-color: #1D4ED8;
+        }
+        .stButton > button[kind="secondary"] {
+            background-color: var(--card);
+            color: var(--ink);
+            border: 1px solid #C9D2E0;
+        }
+        .stButton > button[kind="secondary"]:hover {
+            border-color: var(--blue); color: var(--blue);
+        }
+
+        /* :focus-visible, not :focus -- the old :focus rule drew a ring on
+           mouse clicks too, so people learned to ignore it. Amber against a
+           blue UI stays visible on every control. */
+        .stButton > button:focus-visible,
+        a:focus-visible, input:focus-visible, textarea:focus-visible,
+        select:focus-visible, [role="tab"]:focus-visible,
+        div[data-baseweb="select"]:focus-within {
+            outline: 3px solid var(--focus) !important;
+            outline-offset: 2px !important;
         }
 
         hr, div[data-testid="stDivider"] {
@@ -174,15 +273,39 @@ def inject_theme():
         .stTextInput input, .stTextArea textarea,
         .stSelectbox div[data-baseweb="select"] {
             background-color: var(--card) !important;
-            border: 1px solid var(--border) !important;
+            border: 1px solid #C9D2E0 !important;
             border-radius: 8px !important;
             color: var(--ink) !important;
-            font-family: 'Inter', sans-serif;
+            font-family: var(--font);
         }
 
         [data-testid="stCaptionContainer"] {
-            font-family: 'Inter', sans-serif !important;
+            font-family: var(--font) !important;
             color: var(--ink-muted) !important;
+        }
+
+        .page-stamp {
+            display: inline-block;
+            font-family: var(--font);
+            font-size: 0.72rem;
+            font-weight: 600;
+            letter-spacing: 0.03em;
+            text-transform: uppercase;
+            color: var(--blue);
+            background-color: var(--blue-soft);
+            border-radius: 20px;
+            padding: 4px 14px;
+            margin-bottom: 0.6rem;
+        }
+
+        /* Auto-refresh means the page can move under someone who did not ask
+           it to. Honour the OS-level preference. */
+        @media (prefers-reduced-motion: reduce) {
+            *, *::before, *::after {
+                animation-duration: 0.001ms !important;
+                transition-duration: 0.001ms !important;
+                scroll-behavior: auto !important;
+            }
         }
         </style>
         """,
@@ -194,23 +317,7 @@ def page_stamp(label: str):
     """Renders a small colored pill with the page name at the top of
     a page, in the Solar Admin theme's blue accent."""
     st.markdown(
-        f"""
-        <div style="
-            display:inline-block;
-            font-family:'Inter', sans-serif;
-            font-size:0.72rem;
-            font-weight:600;
-            letter-spacing:0.03em;
-            text-transform:uppercase;
-            color:#3B82F6;
-            background-color:#EFF6FF;
-            border-radius:20px;
-            padding:4px 14px;
-            margin-bottom:0.6rem;
-        ">
-            {label}
-        </div>
-        """,
+        f'<div class="page-stamp">{label}</div>',
         unsafe_allow_html=True,
     )
 
@@ -325,6 +432,19 @@ def plot_weather_signals(time, temperatures, irradiances, title="Weather Data", 
 
     fig.tight_layout()
     return fig
+
+
+def close_figures(figs):
+    """Release matplotlib figures after rendering.
+
+    Streamlit reruns constantly and every rerun built new figures that were
+    never closed, so the process leaked memory for as long as the app stayed
+    up. Call this after st.pyplot()."""
+    for f in (figs.values() if isinstance(figs, dict) else figs):
+        try:
+            plt.close(f)
+        except Exception:
+            pass
 
 
 def plot_irradiance_frequency(df, columns, bin_width=50, max_irr=1200):
@@ -612,13 +732,8 @@ def generate_pdf_report(df, report_title, observation, fig, df_dcm=None):
 NUM_SENSORS = 24
 
 
-def get_forced_sensors() -> set:
-    """Best-effort read of which sensor IDs currently have the
-    sub-zero cutoff overridden (pi_settings.force_log_sensors, a
-    jsonb array of ints). Returns an empty set (i.e. nothing forced —
-    normal/safe behavior) if the column/row doesn't exist yet or the
-    request fails, so a Supabase hiccup never shows a false 'currently
-    forcing' state. Not cached — needs to reflect toggles immediately."""
+@st.cache_data(ttl=3)
+def _forced_sensors_cached() -> frozenset:
     try:
         res = (
             supabase.table("pi_settings")
@@ -627,11 +742,24 @@ def get_forced_sensors() -> set:
             .execute()
         )
         if res.data:
-            raw = res.data[0].get("force_log_sensors") or []
-            return {int(s) for s in raw}
+            return frozenset(int(s) for s in (res.data[0].get("force_log_sensors") or []))
     except Exception:
         pass
-    return set()
+    return frozenset()
+
+
+def get_forced_sensors() -> set:
+    """Best-effort read of which sensor IDs currently have the
+    sub-zero cutoff overridden (pi_settings.force_log_sensors, a
+    jsonb array of ints). Returns an empty set (i.e. nothing forced —
+    normal/safe behavior) if the column/row doesn't exist yet or the
+    request fails, so a Supabase hiccup never shows a false 'currently
+    forcing' state.
+
+    Cached for 3s and invalidated on every write. Previously uncached, which
+    meant a round trip to Supabase on every single rerun -- and with 24 toggle
+    buttons on two pages, every click paid for one."""
+    return set(_forced_sensors_cached())
 
 
 def set_sensor_force(sensor_id: int, forced: bool) -> bool:
@@ -648,28 +776,41 @@ def set_sensor_force(sensor_id: int, forced: bool) -> bool:
         supabase.table("pi_settings").update(
             {"force_log_sensors": sorted(current)}
         ).eq("id", 1).execute()
+        _forced_sensors_cached.clear()   # so the UI reflects the toggle at once
         return True
     except Exception:
         return False
 
 
+def _safe_query(table: str, limit: int, label: str):
+    """Run a Supabase read and surface failures as a message rather than a
+    stack trace. Every fetcher used to let an exception escape, so a brief
+    connection blip took the whole page down instead of showing stale data."""
+    try:
+        res = (
+            supabase.table(table)
+            .select("*")
+            .order("created_at", desc=True)
+            .limit(limit)
+            .execute()
+        )
+        return res.data or []
+    except Exception as exc:
+        st.session_state[f"_fetch_error_{table}"] = str(exc)
+        st.warning(f"Couldn't load {label} from the database. Showing nothing for now.")
+        return []
+
+
 @st.cache_data(ttl=5)
 def fetch_latest_readings(limit=50):
-    response = (
-        supabase.table("sensor_readings")
-        .select("*")
-        .order("created_at", desc=True)
-        .limit(limit)
-        .execute()
-    )
-    rows = response.data
+    rows = _safe_query("sensor_readings", limit, "sensor readings")
     if not rows:
         return pd.DataFrame()
 
     # flatten the jsonb "readings" column into normal columns
     flat_rows = []
     for r in rows:
-        flat = {"created_at": r["created_at"], "date": r.get("date"), "time": r.get("time")}
+        flat = {"created_at": r.get("created_at"), "date": r.get("date"), "time": r.get("time")}
         flat.update(r.get("readings") or {})
         flat_rows.append(flat)
 
@@ -680,31 +821,18 @@ def fetch_latest_readings(limit=50):
 
 @st.cache_data(ttl=5)
 def fetch_recent_alerts(limit=200):
-    response = (
-        supabase.table("sensor_alerts")
-        .select("*")
-        .order("created_at", desc=True)
-        .limit(limit)
-        .execute()
-    )
-    rows = response.data
+    rows = _safe_query("sensor_alerts", limit, "sensor alerts")
     if not rows:
         return pd.DataFrame()
     df = pd.DataFrame(rows)
-    df["created_at"] = pd.to_datetime(df["created_at"])
+    # errors="coerce": one malformed timestamp used to raise and blank the page
+    df["created_at"] = pd.to_datetime(df["created_at"], errors="coerce")
     return df
 
 
 @st.cache_data(ttl=5)
 def fetch_latest_panel_readings(limit=200):
-    response = (
-        supabase.table("panel_readings")
-        .select("*")
-        .order("created_at", desc=True)
-        .limit(limit)
-        .execute()
-    )
-    rows = response.data
+    rows = _safe_query("panel_readings", limit, "panel meter readings")
     if not rows:
         return pd.DataFrame()
 

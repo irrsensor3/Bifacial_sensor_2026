@@ -4,6 +4,7 @@ import pandas as pd
 from ui_sections import (
     require_login,
     page_stamp,
+    close_figures,
     plot_weather_signals,
     preview_report_content,
     generate_word_report,
@@ -22,12 +23,12 @@ def render_data_reports():
     require_login()
 
     page_stamp("Data & Reports")
-    st.title("📁 Data & Reports")
+    st.title("Data and reports")
 
     # -------------------------
     # Report source: pick a CSV from Google Drive
     # -------------------------
-    st.subheader("📁 Select Data Source (Google Drive)")
+    st.subheader("Data source")
 
     available_files = list_available_csvs()
 
@@ -52,7 +53,7 @@ def render_data_reports():
         )
         selected_file = available_files[selected_idx]
 
-        if st.button("📥 Load selected file"):
+        if st.button("Load selected file"):
             try:
                 df = download_csv_as_df(selected_file["id"])
                 st.session_state["_loaded_df"] = df
@@ -70,7 +71,7 @@ def render_data_reports():
     # -------------------------
     # Optional: DC meter data from the separate panel-meter-data folder
     # -------------------------
-    st.subheader("🔌 Select DC Meter Data (optional)")
+    st.subheader("DC meter data (optional)")
 
     available_dcm_files = list_available_dcm_csvs()
 
@@ -95,7 +96,7 @@ def render_data_reports():
         )
         selected_dcm_file = available_dcm_files[dcm_selected_idx]
 
-        if st.button("📥 Load DC meter file"):
+        if st.button("Load DC meter file"):
             try:
                 df_dcm = download_dcm_csv_as_df(selected_dcm_file["id"])
                 st.session_state["_loaded_dcm_df"] = df_dcm
@@ -112,18 +113,19 @@ def render_data_reports():
     observation = st.text_area("Observation Notes")
 
     if df is not None:
-        st.subheader("📊 Data Preview")
+        st.subheader("Data preview")
         st.dataframe(df.head(100))
 
-        st.subheader("📌 Dataset Info")
-        st.write(f"Rows: {df.shape[0]}")
-        st.write(f"Columns: {df.shape[1]}")
+        st.subheader("Dataset")
+        info_a, info_b = st.columns(2)
+        info_a.metric("Rows", f"{df.shape[0]:,}")
+        info_b.metric("Columns", f"{df.shape[1]:,}")
 
         time = df["Time"] if "Time" in df.columns else df.index
 
         numeric_cols = df.select_dtypes(include="number").columns.tolist()
 
-        st.subheader("📈 Graph Configuration")
+        st.subheader("Chart columns")
 
         # if a different file was loaded earlier, drop any selected columns
         # that no longer exist so the multiselect widget doesn't error out
@@ -210,32 +212,58 @@ def render_data_reports():
             )
             st.pyplot(fig)
 
-            st.subheader("📄 Generate Reports")
+            st.subheader("Report")
 
-            if st.button("👁️ Preview Report"):
+            if st.button("Preview report"):
                 st.session_state.show_preview = True
 
             if st.session_state.get("show_preview"):
-                with st.expander("📋 Report Preview", expanded=True):
+                with st.expander("Report preview", expanded=True):
                     preview_report_content(df, report_title, observation, fig, df_dcm=df_dcm)
 
                 st.divider()
-                col1, col2 = st.columns(2)
 
-                with col1:
-                    report = generate_word_report(df, report_title, observation, fig, df_dcm=df_dcm)
+                # Both documents used to be generated on EVERY rerun, before
+                # either download button was clicked — so moving a slider
+                # silently rendered a Word file and a PDF, embedding matplotlib
+                # images each time. Build only on request.
+                fmt_col, build_col = st.columns([2, 1])
+                with fmt_col:
+                    fmt = st.radio(
+                        "Report format", ["Word (.docx)", "PDF"],
+                        horizontal=True, key="report_format",
+                    )
+                with build_col:
+                    st.caption(" ")
+                    build = st.button("Build report", type="primary",
+                                      use_container_width=True)
+
+                if build:
+                    with st.spinner(f"Building the {fmt} report…"):
+                        try:
+                            if fmt.startswith("Word"):
+                                st.session_state["_report_bytes"] = generate_word_report(
+                                    df, report_title, observation, fig, df_dcm=df_dcm)
+                                st.session_state["_report_name"] = "PV_Report.docx"
+                                st.session_state["_report_mime"] = (
+                                    "application/vnd.openxmlformats-officedocument"
+                                    ".wordprocessingml.document")
+                            else:
+                                st.session_state["_report_bytes"] = generate_pdf_report(
+                                    df, report_title, observation, fig, df_dcm=df_dcm)
+                                st.session_state["_report_name"] = "PV_Report.pdf"
+                                st.session_state["_report_mime"] = "application/pdf"
+                        except Exception as exc:
+                            st.session_state["_report_bytes"] = None
+                            st.error(f"The report could not be built: {exc}")
+
+                if st.session_state.get("_report_bytes") is not None:
                     st.download_button(
-                        label="⬇️ Download Word Report",
-                        data=report,
-                        file_name="PV_Report.docx",
-                        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                        label=f"Download {st.session_state['_report_name']}",
+                        data=st.session_state["_report_bytes"],
+                        file_name=st.session_state["_report_name"],
+                        mime=st.session_state["_report_mime"],
                     )
 
-                with col2:
-                    report = generate_pdf_report(df, report_title, observation, fig, df_dcm=df_dcm)
-                    st.download_button(
-                        label="⬇️ Download PDF Report",
-                        data=report,
-                        file_name="PV_Report.pdf",
-                        mime="application/pdf"
-                    )
+            # matplotlib figures were never released; every rerun made more
+            close_figures([fig])

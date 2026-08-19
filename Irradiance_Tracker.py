@@ -1,6 +1,11 @@
 import streamlit as st
 
-from ui_sections import require_login, page_stamp, plot_irradiance_frequency
+from ui_sections import (
+    require_login,
+    page_stamp,
+    plot_irradiance_frequency,
+    close_figures,
+)
 from drive_fetch import (
     list_available_csvs,
     download_and_combine_csvs,
@@ -16,7 +21,7 @@ def render_irradiance_tracker():
     require_login()
 
     page_stamp("Irradiance Tracker")
-    st.title("📈 Irradiance Tracker")
+    st.title("Irradiance tracker")
     st.caption(
         f"Frequency distribution of irradiance readings (0-{MAX_IRRADIANCE} W/m²), "
         "built from every CSV synced from Google Drive for the selected month — "
@@ -37,19 +42,27 @@ def render_irradiance_tracker():
         return
 
     years = sorted({extract_year(f) for f in available_files}, reverse=True)
+    if not years:
+        st.warning("Found CSVs in Drive, but none had a recognisable date in the filename.")
+        return
     year_col, month_col = st.columns(2)
     with year_col:
         selected_year = st.selectbox("Year", years, index=0)
 
     year_files = [f for f in available_files if extract_year(f) == selected_year]
     months = sorted({extract_month(f) for f in year_files})
+    if not months:
+        st.warning(f"No files with a recognisable month for {selected_year}.")
+        return
     with month_col:
-        selected_month = st.selectbox("Month", months, index=len(months) - 1, format_func=month_label)
+        # index=len(months)-1 raised IndexError on an empty list
+        selected_month = st.selectbox("Month", months, index=len(months) - 1,
+                                      format_func=month_label)
 
     period_files = [f for f in year_files if extract_month(f) == selected_month]
     st.caption(f"{len(period_files)} file(s) found for {month_label(selected_month)} {selected_year}")
 
-    if st.button("📥 Load month data"):
+    if st.button("Load month data", type="primary"):
         file_ids = tuple(f["id"] for f in period_files)
         with st.spinner(f"Downloading {len(file_ids)} file(s) for {month_label(selected_month)} {selected_year}..."):
             df_month = download_and_combine_csvs(file_ids)
@@ -106,5 +119,15 @@ def render_irradiance_tracker():
         df_month, selected_cols, bin_width=bin_width, max_irr=MAX_IRRADIANCE
     )
 
-    for col in selected_cols:
-        st.pyplot(figs[col])
+    # Two per row: 24 sensors stacked single-file meant a very long scroll and
+    # no way to compare distributions side by side.
+    for i in range(0, len(selected_cols), 2):
+        pair = selected_cols[i:i + 2]
+        cols = st.columns(len(pair))
+        for slot, col in zip(cols, pair):
+            with slot:
+                st.pyplot(figs[col])
+
+    # Every rerun built new figures and left them open, leaking memory for as
+    # long as the app stayed up.
+    close_figures(figs)

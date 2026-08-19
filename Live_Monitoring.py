@@ -25,15 +25,29 @@ def render_live_monitoring():
     require_login()
 
     page_stamp("Live Monitoring")
-    st.title("📡 Live Monitoring")
+    st.title("Live monitoring")
 
     # -------------------------
     # Live sensor data
     # -------------------------
-    st.subheader("Live Sensor Data")
+    st.subheader("Sensors")
 
-    refresh_seconds = st.slider("Auto-refresh interval (seconds)", 5, 60, 15)
-    st_autorefresh(interval=refresh_seconds * 1000, key="live_refresh")
+    # Auto-refresh is now opt-out. It reruns the whole script, refetching from
+    # Supabase and resetting scroll position, which fights anyone reading a
+    # chart or filling in the append controls below.
+    ref_on, ref_int = st.columns([1, 3])
+    with ref_on:
+        auto_refresh = st.toggle("Auto-refresh", value=True, key="live_auto_refresh")
+    with ref_int:
+        refresh_seconds = st.slider(
+            "Refresh every (seconds)", 5, 60, 15,
+            disabled=not auto_refresh, key="live_refresh_secs",
+        )
+    if auto_refresh:
+        st_autorefresh(interval=refresh_seconds * 1000, key="live_refresh")
+    else:
+        if st.button("Refresh now"):
+            st.rerun()
 
     df_live = fetch_latest_readings()
 
@@ -50,10 +64,21 @@ def render_live_monitoring():
         # table exists.
 
         # quick "latest values" snapshot
-        cols = st.columns(4)
-        for i, col in enumerate(irr_cols[:4]):
-            val = latest[col]
-            cols[i].metric(col, f"{val:.1f} W/m²" if val is not None else "—")
+        # f"{val:.1f}" raised on a string and printed "nan" for a missing
+        # reading; coerce and show an explicit dash instead.
+        def _fmt(val, unit, places=1):
+            num = pd.to_numeric(val, errors="coerce")
+            return f"{num:,.{places}f} {unit}" if pd.notna(num) else "no reading"
+
+        shown = irr_cols[:4]
+        cols = st.columns(max(len(shown), 1))
+        for i, col in enumerate(shown):
+            cols[i].metric(col.replace("_", " "), _fmt(latest[col], "W/m²"))
+        if len(irr_cols) > 4:
+            st.caption(
+                f"Showing 4 of {len(irr_cols)} sensors. The full set is in the "
+                f"chart and the raw table below."
+            )
 
         if "selected_live_irr" not in st.session_state:
             st.session_state.selected_live_irr = irr_cols[:1]
@@ -177,11 +202,12 @@ def render_live_monitoring():
             )
             st.plotly_chart(fig, use_container_width=True)
 
-        with st.expander("Raw live data table"):
+        with st.expander("Raw readings table"):
+            st.caption(f"{len(df_live):,} rows, newest last.")
             st.dataframe(df_live, use_container_width=True, hide_index=True)
 
         # Sensors below 0°C
-        st.markdown("### 🌡️ Sensors Below 0°C")
+        st.markdown("### Sensors below 0 °C")
 
         df_alerts = fetch_recent_alerts()
 
@@ -189,20 +215,24 @@ def render_live_monitoring():
             st.success("No sub-zero alerts recorded — all sensors logging normally.")
         else:
             latest_per_sensor = df_alerts.sort_values("created_at").groupby("sensor_id").tail(1)
+            # Subtracting a tz-aware "now" from a tz-naive column raises
+            # TypeError and blanks the page. Normalise to UTC first.
+            stamps = pd.to_datetime(latest_per_sensor["created_at"], errors="coerce", utc=True)
             now_utc = pd.Timestamp.now(tz="UTC")
-            currently_invalid = latest_per_sensor[
-                now_utc - latest_per_sensor["created_at"] < pd.Timedelta(seconds=150)
-            ]
+            recent = (now_utc - stamps) < pd.Timedelta(seconds=150)
+            currently_invalid = latest_per_sensor[recent.fillna(False)]
 
             if currently_invalid.empty:
                 st.success("No sensors currently below 0°C.")
             else:
                 st.error(f"{len(currently_invalid)} sensor(s) currently below 0°C and not logging:")
                 for _, row in currently_invalid.sort_values("sensor_id").iterrows():
+                    when = pd.to_datetime(row["created_at"], errors="coerce")
+                    when_txt = when.strftime("%H:%M:%S") if pd.notna(when) else "unknown time"
                     st.markdown(
-                        f"🔴 **Sensor {int(row['sensor_id'])}** — {row['temp_c']}°C "
-                        f"@ {row['created_at'].strftime('%H:%M:%S')} "
-                        f"(bus {row['bus']}, addr {row['address']})"
+                        f"**Sensor {int(row['sensor_id'])}** — {row['temp_c']} °C "
+                        f"at {when_txt} (bus {row.get('bus', '?')}, "
+                        f"address {row.get('address', '?')}) — not logging"
                     )
 
             with st.expander("Recent alert history"):
@@ -212,7 +242,7 @@ def render_live_monitoring():
     # Live panel meter data
     # -------------------------
     st.divider()
-    st.subheader("Live Panel Meter Data")
+    st.subheader("Panel meters")
 
     df_panel = fetch_latest_panel_readings()
 
@@ -233,16 +263,23 @@ def render_live_monitoring():
             device_label = f"Meter {int(row['device_id'])}"
             has_error = row.get("error") not in (None, "No error")
 
-            status_dot = "🔴" if has_error else "🟢"
+            def _m(val, unit, places=1):
+                num = pd.to_numeric(val, errors="coerce")
+                return f"{num:,.{places}f} {unit}" if pd.notna(num) else "no reading"
+
+            # Status spelled out, not carried by a coloured dot alone.
             cols = st.columns(5)
-            cols[0].markdown(f"**{status_dot} {device_label}**")
-            cols[1].metric("Voltage", f"{row['voltage_v']:.1f} V" if row["voltage_v"] is not None else "—")
-            cols[2].metric("Current", f"{row['current_a']:.2f} A" if row["current_a"] is not None else "—")
-            cols[3].metric("Power", f"{row['active_power_kw']:.3f} kW" if row["active_power_kw"] is not None else "—")
-            cols[4].metric("Energy", f"{row['forward_energy_kwh']:.1f} kWh" if row["forward_energy_kwh"] is not None else "—")
+            cols[0].markdown(
+                f"**{device_label}**  \n"
+                + ("⚠️ Fault" if has_error else "OK")
+            )
+            cols[1].metric("Voltage", _m(row.get("voltage_v"), "V"))
+            cols[2].metric("Current", _m(row.get("current_a"), "A", 2))
+            cols[3].metric("Power", _m(row.get("active_power_kw"), "kW", 3))
+            cols[4].metric("Energy", _m(row.get("forward_energy_kwh"), "kWh"))
 
             if has_error:
-                st.caption(f"⚠️ {device_label}: {row.get('error')}")
+                st.caption(f"{device_label} reported: {row.get('error')}")
 
         # -------------------------
         # Append historical DC meter data onto this same chart

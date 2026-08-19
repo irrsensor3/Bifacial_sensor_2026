@@ -1,10 +1,13 @@
-streamlit
-pandas
-matplotlib
-python-docx
-fpdf2
-supabase
-streamlit-autorefresh
-google-api-python-client
-google-auth
-plotly
+# Pinned to major versions. Previously unpinned, so a new Streamlit release
+# could break the deployed app without anyone changing a line of code.
+# Bump deliberately, then redeploy and check the pages still render.
+streamlit>=1.36,<2.0
+pandas>=2.0,<3.0
+matplotlib>=3.7,<4.0
+python-docx>=1.1,<2.0
+fpdf2>=2.7,<3.0
+supabase>=2.0,<3.0
+streamlit-autorefresh>=1.0,<2.0
+google-api-python-client>=2.100,<3.0
+google-auth>=2.30,<3.0
+plotly>=5.18,<7.0
