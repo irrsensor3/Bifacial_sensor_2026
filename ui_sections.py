@@ -851,37 +851,60 @@ def fetch_latest_panel_readings(limit=200):
 # optionally emails a digest of new ones.
 # =========================
 
+_ALERT_LEVELS = {"CRITICAL", "FATAL", "ERROR", "WARNING", "WARN"}
+
+# Matches modbus_logger.py's exact format:
+#   format="%(asctime)s [%(levelname)s] %(message)s"
+# e.g. "2026-08-20 10:15:32,456 [ERROR] [main] Error during Modbus read: ..."
+# Python's default asctime is "YYYY-MM-DD HH:MM:SS,mmm" (comma before millis).
+_STRICT_LOG_LINE_RE = re.compile(
+    r"^(?P<ts>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})(?:,\d+)?\s*"
+    r"\[(?P<level>[A-Za-z]+)\]\s*(?P<msg>.*)$"
+)
+
+# Fallback for anything that doesn't match the strict format above (e.g. a
+# differently-formatted log on the Pi) — matches a level keyword anywhere in
+# the line and pulls a leading timestamp if present, rather than requiring
+# an exact structure.
 _LOG_LEVEL_RE = re.compile(r"\b(CRITICAL|FATAL|ERROR|WARNING|WARN)\b", re.IGNORECASE)
-# Loosely matches a leading "2026-08-20 10:15:32" or
-# "2026-08-20T10:15:32" style timestamp, if the line has one. Falls
-# back to no timestamp rather than failing the line.
 _TIMESTAMP_RE = re.compile(r"^\s*(\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2})")
 
 
 def parse_log_alerts(log_text: str, filename: str, device: str) -> list[dict]:
-    """Scans one log file's text for lines mentioning an error-level
-    keyword. Doesn't assume a specific log format — matches the level
-    keyword anywhere in the line and pulls a leading timestamp if
-    present, so it degrades gracefully across different logging
-    setups on the Pi vs the mini PC. Returns a list of dicts with a
+    """Scans one log file's text for ERROR/WARNING/CRITICAL lines.
+    Tries the exact modbus_logger.py format first (strict timestamp +
+    bracketed level), which correctly excludes INFO/DEBUG lines even
+    if their message text happens to mention a level word. Falls back
+    to a loose keyword scan for lines that don't match — e.g. a
+    different logging setup on the Pi. Returns a list of dicts with a
     stable `hash` per line (filename + line content) used for dedup."""
     alerts = []
     for line in log_text.splitlines():
-        line = line.strip()
+        line = line.rstrip("\n").strip()
         if not line:
             continue
-        level_match = _LOG_LEVEL_RE.search(line)
-        if not level_match:
-            continue
-        ts_match = _TIMESTAMP_RE.match(line)
-        level = level_match.group(1).upper()
+
+        strict = _STRICT_LOG_LINE_RE.match(line)
+        if strict:
+            level = strict.group("level").upper()
+            if level not in _ALERT_LEVELS:
+                continue  # INFO/DEBUG — not an alert
+            timestamp = strict.group("ts")
+        else:
+            level_match = _LOG_LEVEL_RE.search(line)
+            if not level_match:
+                continue
+            level = level_match.group(1).upper()
+            ts_match = _TIMESTAMP_RE.match(line)
+            timestamp = ts_match.group(1) if ts_match else None
+
         line_hash = hashlib.sha256(f"{filename}:{line}".encode()).hexdigest()[:16]
         alerts.append({
             "hash": line_hash,
             "device": device,
             "file": filename,
             "level": "WARNING" if level in ("WARN", "WARNING") else level,
-            "timestamp": ts_match.group(1) if ts_match else None,
+            "timestamp": timestamp,
             "message": line,
         })
     return alerts
