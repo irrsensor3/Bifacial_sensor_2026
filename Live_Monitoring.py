@@ -265,35 +265,44 @@ def render_live_monitoring():
         latest_overall = df_panel.iloc[-1]
         st.caption(f"Last update: {latest_overall['created_at']}")
 
-        for _, row in latest_per_device.iterrows():
-            device_label = f"Meter {int(row['device_id'])}"
-            has_error = row.get("error") not in (None, "No error")
+        # Display DC meters in 2 columns per row, with each meter having 2 rows of data
+        devices = list(latest_per_device.iterrows())
+        for row_idx in range(0, len(devices), 2):
+            cols = st.columns(2)
+            for col_idx in range(2):
+                device_pos = row_idx + col_idx
+                if device_pos < len(devices):
+                    _, row = devices[device_pos]
+                    device_label = f"Meter {int(row['device_id'])}"
+                    has_error = row.get("error") not in (None, "No error")
 
-            def _m(val, unit, places=1):
-                num = pd.to_numeric(val, errors="coerce")
-                return f"{num:,.{places}f} {unit}" if pd.notna(num) else "no reading"
+                    def _m(val, unit, places=1):
+                        num = pd.to_numeric(val, errors="coerce")
+                        return f"{num:,.{places}f} {unit}" if pd.notna(num) else "no reading"
 
-            # Display DC meter data in 3 columns per row (meter name + 4 metrics)
-            # Reorganized to show 2-3 columns
-            meter_name_col, metric1_col, metric2_col = st.columns(3)
-            with meter_name_col:
-                st.markdown(
-                    f"**{device_label}**  \n"
-                    + ("⚠️ Fault" if has_error else "OK")
-                )
-            with metric1_col:
-                st.metric("Voltage", _m(row.get("voltage_v"), "V"))
-            with metric2_col:
-                st.metric("Current", _m(row.get("current_a"), "A", 2))
-            
-            power_col, energy_col, _ = st.columns(3)
-            with power_col:
-                st.metric("Power", _m(row.get("active_power_kw"), "kW", 3))
-            with energy_col:
-                st.metric("Energy", _m(row.get("forward_energy_kwh"), "kWh"))
+                    with cols[col_idx]:
+                        # First row: Title and status
+                        st.markdown(
+                            f"**{device_label}**  \n"
+                            + ("⚠️ Fault" if has_error else "OK")
+                        )
+                        
+                        # Second row: Voltage and Current side by side
+                        metric_cols_1 = st.columns(2)
+                        with metric_cols_1[0]:
+                            st.metric("Voltage", _m(row.get("voltage_v"), "V"))
+                        with metric_cols_1[1]:
+                            st.metric("Current", _m(row.get("current_a"), "A", 2))
+                        
+                        # Third row: Power and Energy side by side
+                        metric_cols_2 = st.columns(2)
+                        with metric_cols_2[0]:
+                            st.metric("Power", _m(row.get("active_power_kw"), "kW", 3))
+                        with metric_cols_2[1]:
+                            st.metric("Energy", _m(row.get("forward_energy_kwh"), "kWh"))
 
-            if has_error:
-                st.caption(f"{device_label} reported: {row.get('error')}")
+                        if has_error:
+                            st.caption(f"{device_label} reported: {row.get('error')}")
 
         # -------------------------
         # Append historical DC meter data onto this same chart
