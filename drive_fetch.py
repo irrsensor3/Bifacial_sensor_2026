@@ -18,7 +18,7 @@ DCM_DRIVE_FOLDER_NAME = "panel-meter-data"
 
 # Separate Drive folder for device .log files (Pi + mini PC) — see
 # LOG_DRIVE_FOLDER_NAME below for the alert-scanning feature
-LOG_DRIVE_FOLDER_NAME = "device-logs"
+LOG_DRIVE_FOLDER_NAME = "panel-meter-logs"
 
 SCOPES = ["https://www.googleapis.com/auth/drive.readonly"]
 
