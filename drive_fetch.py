@@ -16,8 +16,13 @@ DRIVE_FOLDER_NAME = "bifacial-data"
 # per meter device (e.g. dcm_3366)
 DCM_DRIVE_FOLDER_NAME = "panel-meter-data"
 
-# Separate Drive folder for device .log files (Pi + mini PC) — see
-# LOG_DRIVE_FOLDER_NAME below for the alert-scanning feature
+# Separate Drive folder for the mini PC's Modbus device logs —
+# organized as <root>/<device_id>/YYYY-MM-DD.log (e.g.
+# panel-meter-logs/dcm_3366/2026-08-20.log) — one subfolder per
+# device, no separate year/month levels since the date is in the
+# filename. Confirmed against the actual Drive layout, not a guess.
+# NOTE: this is the mini PC's logs only so far — wherever the
+# Raspberry Pi's own logs land (if anywhere yet) isn't covered here.
 LOG_DRIVE_FOLDER_NAME = "panel-meter-logs"
 
 SCOPES = ["https://www.googleapis.com/auth/drive.readonly"]
@@ -322,10 +327,10 @@ def download_log_text(file_id: str) -> str:
 
 
 def device_label_for(file_entry: dict) -> str:
-    """Best-effort device name for a log file — the first folder
-    segment that isn't a 4-digit year or a 2-digit month (e.g. 'pi' or
-    'mini-pc' in <root>/<device>/<year>/<month>/*.log). Falls back to
-    the filename if the folder structure doesn't have one."""
+    """Best-effort device name for a log file — the first non-numeric
+    folder segment (e.g. 'dcm_3366' or 'tp_700' in
+    <root>/<device_id>/YYYY-MM-DD.log). Falls back to the filename if
+    the folder structure doesn't have one."""
     path = file_entry.get("folder_path") or []
     for part in path:
         if part.isdigit() and (len(part) == 4 or len(part) == 2):
