@@ -281,28 +281,30 @@ def render_live_monitoring():
                         return f"{num:,.{places}f} {unit}" if pd.notna(num) else "no reading"
 
                     with cols[col_idx]:
-                        # First row: Title and status
-                        st.markdown(
-                            f"**{device_label}**  \n"
-                            + ("⚠️ Fault" if has_error else "OK")
-                        )
-                        
-                        # Second row: Voltage and Current side by side
-                        metric_cols_1 = st.columns(2)
-                        with metric_cols_1[0]:
-                            st.metric("Voltage", _m(row.get("voltage_v"), "V"))
-                        with metric_cols_1[1]:
-                            st.metric("Current", _m(row.get("current_a"), "A", 2))
-                        
-                        # Third row: Power and Energy side by side
-                        metric_cols_2 = st.columns(2)
-                        with metric_cols_2[0]:
-                            st.metric("Power", _m(row.get("active_power_kw"), "kW", 3))
-                        with metric_cols_2[1]:
-                            st.metric("Energy", _m(row.get("forward_energy_kwh"), "kWh"))
+                        # Use container with border for each meter card
+                        with st.container(border=True):
+                            # First row: Title and status
+                            st.markdown(
+                                f"**{device_label}**  \n"
+                                + ("⚠️ Fault" if has_error else "OK")
+                            )
+                            
+                            # Second row: Voltage and Current side by side
+                            metric_cols_1 = st.columns(2)
+                            with metric_cols_1[0]:
+                                st.metric("Voltage", _m(row.get("voltage_v"), "V"))
+                            with metric_cols_1[1]:
+                                st.metric("Current", _m(row.get("current_a"), "A", 2))
+                            
+                            # Third row: Power and Energy side by side
+                            metric_cols_2 = st.columns(2)
+                            with metric_cols_2[0]:
+                                st.metric("Power", _m(row.get("active_power_kw"), "kW", 3))
+                            with metric_cols_2[1]:
+                                st.metric("Energy", _m(row.get("forward_energy_kwh"), "kWh"))
 
-                        if has_error:
-                            st.caption(f"{device_label} reported: {row.get('error')}")
+                            if has_error:
+                                st.caption(f"{device_label} reported: {row.get('error')}")
 
         # -------------------------
         # Append historical DC meter data onto this same chart
