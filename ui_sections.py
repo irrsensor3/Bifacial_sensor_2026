@@ -7,6 +7,9 @@ import os
 import hashlib
 import hmac
 import time
+import re
+import smtplib
+from email.mime.text import MIMEText
 import matplotlib.pyplot as plt
 from fpdf import FPDF
 import tempfile
@@ -839,3 +842,157 @@ def fetch_latest_panel_readings(limit=200):
     df_panel = pd.DataFrame(rows)
     df_panel = df_panel.sort_values("created_at")  # oldest -> newest for plotting
     return df_panel
+
+
+# =========================
+# DEVICE LOG ALERTS — scans .log files from Drive (device-logs
+# folder) for ERROR/WARNING/CRITICAL lines, tracks which have already
+# been surfaced (so re-scanning the same file doesn't re-notify), and
+# optionally emails a digest of new ones.
+# =========================
+
+_LOG_LEVEL_RE = re.compile(r"\b(CRITICAL|FATAL|ERROR|WARNING|WARN)\b", re.IGNORECASE)
+# Loosely matches a leading "2026-08-20 10:15:32" or
+# "2026-08-20T10:15:32" style timestamp, if the line has one. Falls
+# back to no timestamp rather than failing the line.
+_TIMESTAMP_RE = re.compile(r"^\s*(\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2})")
+
+
+def parse_log_alerts(log_text: str, filename: str, device: str) -> list[dict]:
+    """Scans one log file's text for lines mentioning an error-level
+    keyword. Doesn't assume a specific log format — matches the level
+    keyword anywhere in the line and pulls a leading timestamp if
+    present, so it degrades gracefully across different logging
+    setups on the Pi vs the mini PC. Returns a list of dicts with a
+    stable `hash` per line (filename + line content) used for dedup."""
+    alerts = []
+    for line in log_text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        level_match = _LOG_LEVEL_RE.search(line)
+        if not level_match:
+            continue
+        ts_match = _TIMESTAMP_RE.match(line)
+        level = level_match.group(1).upper()
+        line_hash = hashlib.sha256(f"{filename}:{line}".encode()).hexdigest()[:16]
+        alerts.append({
+            "hash": line_hash,
+            "device": device,
+            "file": filename,
+            "level": "WARNING" if level in ("WARN", "WARNING") else level,
+            "timestamp": ts_match.group(1) if ts_match else None,
+            "message": line,
+        })
+    return alerts
+
+
+@st.cache_data(ttl=3)
+def _seen_log_alert_hashes_cached() -> frozenset:
+    try:
+        res = (
+            supabase.table("log_alert_state")
+            .select("seen_hashes")
+            .eq("id", 1)
+            .execute()
+        )
+        if res.data:
+            return frozenset(res.data[0].get("seen_hashes") or [])
+    except Exception:
+        pass
+    return frozenset()
+
+
+def get_seen_log_alert_hashes() -> set:
+    """Best-effort read of which log-alert line hashes have already
+    been surfaced/emailed. Returns an empty set (i.e. treat everything
+    as new) if the table/row doesn't exist yet or the request fails —
+    see the SQL below to create it.
+
+    Run this once in the Supabase SQL editor:
+        create table log_alert_state (
+            id int primary key,
+            seen_hashes jsonb not null default '[]'::jsonb
+        );
+        insert into log_alert_state (id, seen_hashes) values (1, '[]');
+    """
+    return set(_seen_log_alert_hashes_cached())
+
+
+def mark_log_alerts_seen(new_hashes: set) -> bool:
+    """Adds `new_hashes` to the seen set, capped to the most recent
+    2000 (a jsonb array with no cap would grow forever). Returns True
+    on success."""
+    try:
+        current = get_seen_log_alert_hashes()
+        current |= new_hashes
+        capped = list(current)[-2000:]
+        supabase.table("log_alert_state").update(
+            {"seen_hashes": capped}
+        ).eq("id", 1).execute()
+        _seen_log_alert_hashes_cached.clear()
+        return True
+    except Exception:
+        return False
+
+
+def email_alerts_configured() -> bool:
+    """Whether SMTP secrets are present, without raising or stopping
+    the app — email is an optional feature, not a hard requirement
+    like the Supabase/Drive secrets."""
+    required = ("SMTP_HOST", "SMTP_PORT", "SMTP_USER", "SMTP_PASSWORD",
+                "ALERT_EMAIL_FROM", "ALERT_EMAIL_TO")
+    try:
+        return all(k in st.secrets for k in required)
+    except Exception:
+        return False
+
+
+def send_alert_email(alerts: list[dict]) -> tuple[bool, str]:
+    """Sends a plain-text digest of `alerts` to ALERT_EMAIL_TO (a
+    comma-separated string in secrets — include a carrier
+    email-to-SMS gateway address alongside a real email address to
+    get both from one send). Returns (success, message) rather than
+    raising, so a bad SMTP config shows a message instead of a stack
+    trace.
+
+    Required secrets:
+        SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASSWORD,
+        ALERT_EMAIL_FROM, ALERT_EMAIL_TO
+    For Gmail: SMTP_HOST="smtp.gmail.com", SMTP_PORT=587, and
+    SMTP_PASSWORD must be a 16-character App Password, not your normal
+    Gmail password (Google blocks plain password SMTP login)."""
+    if not email_alerts_configured():
+        return False, "Email alerts aren't configured — see the secrets needed in send_alert_email()'s docstring."
+    if not alerts:
+        return False, "No alerts to send."
+
+    try:
+        host = st.secrets["SMTP_HOST"]
+        port = int(st.secrets["SMTP_PORT"])
+        user = st.secrets["SMTP_USER"]
+        password = st.secrets["SMTP_PASSWORD"]
+        sender = st.secrets["ALERT_EMAIL_FROM"]
+        recipients = [r.strip() for r in st.secrets["ALERT_EMAIL_TO"].split(",") if r.strip()]
+
+        lines = [f"{len(alerts)} new alert(s) from the PV logging system:", ""]
+        for a in alerts[:25]:  # cap so a huge batch doesn't produce a giant text/SMS
+            when = a["timestamp"] or "unknown time"
+            lines.append(f"[{a['level']}] {a['device']} — {when}")
+            lines.append(f"  {a['message'][:200]}")
+        if len(alerts) > 25:
+            lines.append(f"...and {len(alerts) - 25} more. Check the Alerts page for the full list.")
+
+        msg = MIMEText("\n".join(lines))
+        msg["Subject"] = f"PV system: {len(alerts)} new alert(s)"
+        msg["From"] = sender
+        msg["To"] = ", ".join(recipients)
+
+        with smtplib.SMTP(host, port, timeout=15) as server:
+            server.starttls()
+            server.login(user, password)
+            server.sendmail(sender, recipients, msg.as_string())
+
+        return True, f"Sent to {len(recipients)} recipient(s)."
+    except Exception as exc:
+        return False, f"Send failed: {exc}"
