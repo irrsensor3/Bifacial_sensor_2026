@@ -26,7 +26,7 @@ def render_alerts():
     st.title("Alerts")
     st.caption(
         "Scans the .log files synced from the Pi and mini PC into the "
-        "'device-logs' Drive folder for ERROR/WARNING/CRITICAL lines. "
+        "'panel-meter-logs' Drive folder for ERROR/WARNING/CRITICAL lines. "
         "This only checks when this page is loaded or refreshed — it "
         "isn't a 24/7 background watcher."
     )
@@ -54,7 +54,7 @@ def render_alerts():
     if not log_files:
         st.warning(
             "Couldn't find any .log files in Drive — check that the "
-            "'device-logs' folder exists and is shared with the service "
+            "'panel-meter-logs' folder exists and is shared with the service "
             "account. If your logs live under a different folder name, "
             "update LOG_DRIVE_FOLDER_NAME at the top of drive_fetch.py."
         )
