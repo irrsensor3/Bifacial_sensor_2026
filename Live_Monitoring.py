@@ -70,7 +70,7 @@ def render_live_monitoring():
             num = pd.to_numeric(val, errors="coerce")
             return f"{num:,.{places}f} {unit}" if pd.notna(num) else "no reading"
 
-        # Display irradiance metrics in rows of 3
+        # Display irradiance metrics in rows of 3, each in a bordered container
         shown = irr_cols[:4]
         cols_per_row = 3
         for row_start in range(0, len(shown), cols_per_row):
@@ -78,7 +78,9 @@ def render_live_monitoring():
             cols = st.columns(row_end - row_start)
             for col_idx, col in enumerate(cols):
                 actual_idx = row_start + col_idx
-                cols[col_idx].metric(shown[actual_idx].replace("_", " "), _fmt(latest[shown[actual_idx]], "W/m²"))
+                with cols[col_idx]:
+                    with st.container(border=True):
+                        st.metric(shown[actual_idx].replace("_", " "), _fmt(latest[shown[actual_idx]], "W/m²"))
         
         if len(irr_cols) > 4:
             st.caption(
