@@ -70,10 +70,16 @@ def render_live_monitoring():
             num = pd.to_numeric(val, errors="coerce")
             return f"{num:,.{places}f} {unit}" if pd.notna(num) else "no reading"
 
+        # Display irradiance metrics in rows of 3
         shown = irr_cols[:4]
-        cols = st.columns(max(len(shown), 1))
-        for i, col in enumerate(shown):
-            cols[i].metric(col.replace("_", " "), _fmt(latest[col], "W/m²"))
+        cols_per_row = 3
+        for row_start in range(0, len(shown), cols_per_row):
+            row_end = min(row_start + cols_per_row, len(shown))
+            cols = st.columns(row_end - row_start)
+            for col_idx, col in enumerate(cols):
+                actual_idx = row_start + col_idx
+                cols[col_idx].metric(shown[actual_idx].replace("_", " "), _fmt(latest[shown[actual_idx]], "W/m²"))
+        
         if len(irr_cols) > 4:
             st.caption(
                 f"Showing 4 of {len(irr_cols)} sensors. The full set is in the "
@@ -267,16 +273,24 @@ def render_live_monitoring():
                 num = pd.to_numeric(val, errors="coerce")
                 return f"{num:,.{places}f} {unit}" if pd.notna(num) else "no reading"
 
-            # Status spelled out, not carried by a coloured dot alone.
-            cols = st.columns(5)
-            cols[0].markdown(
-                f"**{device_label}**  \n"
-                + ("⚠️ Fault" if has_error else "OK")
-            )
-            cols[1].metric("Voltage", _m(row.get("voltage_v"), "V"))
-            cols[2].metric("Current", _m(row.get("current_a"), "A", 2))
-            cols[3].metric("Power", _m(row.get("active_power_kw"), "kW", 3))
-            cols[4].metric("Energy", _m(row.get("forward_energy_kwh"), "kWh"))
+            # Display DC meter data in 3 columns per row (meter name + 4 metrics)
+            # Reorganized to show 2-3 columns
+            meter_name_col, metric1_col, metric2_col = st.columns(3)
+            with meter_name_col:
+                st.markdown(
+                    f"**{device_label}**  \n"
+                    + ("⚠️ Fault" if has_error else "OK")
+                )
+            with metric1_col:
+                st.metric("Voltage", _m(row.get("voltage_v"), "V"))
+            with metric2_col:
+                st.metric("Current", _m(row.get("current_a"), "A", 2))
+            
+            power_col, energy_col, _ = st.columns(3)
+            with power_col:
+                st.metric("Power", _m(row.get("active_power_kw"), "kW", 3))
+            with energy_col:
+                st.metric("Energy", _m(row.get("forward_energy_kwh"), "kWh"))
 
             if has_error:
                 st.caption(f"{device_label} reported: {row.get('error')}")
