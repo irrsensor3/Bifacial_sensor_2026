@@ -184,7 +184,7 @@ def render_panel_array():
                 # Laid out left-to-right so the screen mirrors the rig: front
                 # sensor, four panels, front sensor. The original stacked these
                 # vertically, which read as a list rather than a row of panels.
-                slots = st.columns([1.15, 1, 1, 1, 1, 1.15])
+                slots = st.columns([1.2, 1, 1, 1, 1, 1.2])
                 with slots[0]:
                     sensor_tile(cfg["front_a"], "Front A", "front")
                 for i, sid in enumerate(cfg["panel_sensors"], start=1):
