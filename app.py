@@ -47,7 +47,7 @@ st.sidebar.subheader("Session")
 # across a redeploy.
 st.sidebar.write(f"Signed in as {(st.session_state.user_role or 'unknown').capitalize()}")
 
-if st.sidebar.button("Sign out", use_container_width=True):
+if st.sidebar.button("Sign out", width="stretch"):
     st.session_state.auth = False
     st.session_state.user_role = None
     st.rerun()
