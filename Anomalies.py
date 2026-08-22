@@ -41,7 +41,31 @@ FAULT_EXPLAIN = {
     "disconnection": "Both current and voltage gone — the panel is not connected.",
     "datetime": "A problem with the timestamps themselves rather than a reading.",
 }
+def send_alert_email(subject: str, body: str) -> bool:
+    """Sends an anomaly notification email using Streamlit secrets."""
+    try:
+        smtp_host = st.secrets.get("SMTP_HOST", "smtp.gmail.com")
+        smtp_port = int(st.secrets.get("SMTP_PORT", 587))
+        smtp_user = st.secrets["SMTP_USER"]
+        smtp_password = st.secrets["SMTP_PASSWORD"]
+        sender = st.secrets.get("ALERT_EMAIL_FROM", smtp_user)
+        recipient = st.secrets.get("ALERT_EMAIL_TO", smtp_user)
 
+        msg = MIMEMultipart()
+        msg["From"] = sender
+        msg["To"] = recipient
+        msg["Subject"] = subject
+        msg.attach(MIMEText(body, "plain"))
+
+        with smtplib.SMTP(smtp_host, smtp_port) as server:
+            server.starttls()
+            server.login(smtp_user, smtp_password)
+            server.sendmail(sender, [recipient], msg.as_string())
+
+        return True
+    except Exception as e:
+        st.error(f"Failed to send email alert: {e}")
+        return False
 
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_panel_history(days: int, _progress=None) -> pd.DataFrame:
@@ -225,6 +249,32 @@ def render_anomalies():
             status.update(label=f"Checked {len(wide):,} samples",
                           state="complete", expanded=False)
         st.session_state["_anom"] = (confirmed, provisional, len(wide), int(days))
+        # --- NEW EMAIL NOTIFICATION LOGIC ---
+        if "sent_alerts" not in st.session_state:
+            st.session_state.sent_alerts = set()
+
+        for f in confirmed:
+            # Create a unique ID for this specific fault so we don't spam emails on reruns
+            identifier = f.get('panel', f.get('subtype', 'unknown'))
+            fault_type = f.get('type', 'unknown')
+            last_seen = f.get('last_day', 'unknown')
+            alert_id = f"{identifier}_{fault_type}_{last_seen}"
+
+            if alert_id not in st.session_state.sent_alerts:
+                subject = f"⚠️ Solar Array Alert: {fault_type.replace('_', ' ').title()}"
+                body = (
+                    f"A confirmed anomaly was detected on the Bifacial PV array.\n\n"
+                    f"• Type: {fault_type}\n"
+                    f"• Severity: {f.get('severity', 'unknown')}\n"
+                    f"• Panel / Subtype: {identifier}\n"
+                    f"• Details: {f.get('detail', 'No details provided.')}\n"
+                    f"• First seen: {f.get('first_day', 'N/A')}\n"
+                    f"• Last seen: {last_seen}\n\n"
+                    f"Log into the monitoring dashboard for more information."
+                )
+                
+                if send_alert_email(subject, body):
+                    st.session_state.sent_alerts.add(alert_id)
 
     if "_anom" not in st.session_state:
         st.info("Choose a period and select **Run detection** to check the array.")
