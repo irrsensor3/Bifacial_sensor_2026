@@ -44,6 +44,11 @@ FAULT_EXPLAIN = {
 def send_alert_email(subject: str, body: str) -> bool:
     """Sends an anomaly notification email using Streamlit secrets."""
     try:
+        # Check if credentials exist before attempting to send
+        if "SMTP_USER" not in st.secrets or "SMTP_PASSWORD" not in st.secrets:
+            st.warning("Email credentials missing in secrets.toml. Alert not sent.")
+            return False
+
         smtp_host = st.secrets.get("SMTP_HOST", "smtp.gmail.com")
         smtp_port = int(st.secrets.get("SMTP_PORT", 587))
         smtp_user = st.secrets["SMTP_USER"]
@@ -57,7 +62,7 @@ def send_alert_email(subject: str, body: str) -> bool:
         msg["Subject"] = subject
         msg.attach(MIMEText(body, "plain"))
 
-        with smtplib.SMTP(smtp_host, smtp_port) as server:
+        with smtplib.SMTP(smtp_host, smtp_port, timeout=10) as server:
             server.starttls()
             server.login(smtp_user, smtp_password)
             server.sendmail(sender, [recipient], msg.as_string())
