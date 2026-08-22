@@ -5,6 +5,9 @@ import numpy as np
 from ui_sections import require_login, page_stamp, supabase
 import pv_gapfill as G
 import detector as D
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 
 # How many rows Supabase returns per request. It caps responses, so a week of
 # 20 meters at ~1,400 samples/day has to be pulled in pages rather than one go.
