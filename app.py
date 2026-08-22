@@ -4,6 +4,10 @@ import pandas as pd
 from ui_sections import (
     login,
     inject_theme,
+    solar_day_bar,
+    hero,
+    feature_cards,
+    array_diagram,
     plot_gauge,
     fetch_latest_readings,
     fetch_latest_panel_readings,
@@ -13,7 +17,7 @@ from Live_Monitoring import render_live_monitoring
 from Admin_Controls import render_admin_controls
 from Irradiance_Tracker import render_irradiance_tracker
 from Panel_Array import render_panel_array
-from Alerts import render_alerts
+from Anomalies import render_anomalies
 
 MAX_IRRADIANCE = 1200   # W/m², matches Irradiance_Tracker.py
 PANEL_CAPACITY_KW = 10  # adjust to your actual inverter/array capacity
@@ -94,51 +98,93 @@ def _average_power(df_panel: pd.DataFrame) -> float:
 
 
 def render_overview(expanded: bool):
-    with st.expander("Site overview", expanded=expanded):
-        gauge_col, photo_col = st.columns([2, 1])
+    """The banner every page opens with: photo, headline, live figures.
 
-        with gauge_col:
-            df_live = fetch_latest_readings(limit=5)
-            df_panel = fetch_latest_panel_readings(limit=5)
+    This replaced two Plotly gauges and a floating photo. The gauges took a
+    third of the screen to show one number each, and the number was the only
+    part anyone read -- so the numbers are now the design, at a size you can
+    take in from across a desk.
+    """
+    df_live = fetch_latest_readings(limit=5)
+    # 200 rows, not 5: the diagram needs at least one recent reading per meter,
+    # and the logger polls all 20 in sequence. With only 5 rows most panels
+    # would render unlit and the array would look half-dead.
+    df_panel = fetch_latest_panel_readings(limit=200)
 
-            irr_value = _average_irradiance(df_live)
-            power_value = _average_power(df_panel)
+    irr = _average_irradiance(df_live)
+    power = _average_power(df_panel)
 
-            if df_live.empty and df_panel.empty:
-                st.info(
-                    "No recent readings. These fill in once the logger pushes "
-                    "a sample."
-                )
+    sensors_live = 0
+    if not df_live.empty:
+        irr_cols = [c for c in df_live.columns if c.startswith("Irr_")]
+        if irr_cols:
+            sensors_live = int(
+                df_live[irr_cols].apply(pd.to_numeric, errors="coerce")
+                .iloc[-1].notna().sum()
+            )
 
-            g1, g2 = st.columns(2)
-            with g1:
-                st.plotly_chart(
-                    plot_gauge(irr_value, MAX_IRRADIANCE,
-                               "Average irradiance", "W/m²", color="#B45309"),
-                    use_container_width=True,
-                )
-                # The gauge alone is unreadable to a screen reader, and the
-                # number is hard to read off an arc. State it in text too.
-                st.caption(f"Mean across all sensors, last 5 samples · {irr_value:,.0f} W/m²")
-            with g2:
-                st.plotly_chart(
-                    plot_gauge(power_value, PANEL_CAPACITY_KW,
-                               "Average panel power", "kW", color="#15803D"),
-                    use_container_width=True,
-                )
-                st.caption(f"Mean across meters, last 5 samples · {power_value:,.2f} kW")
+    last_seen = "—"
+    for frame in (df_live, df_panel):
+        if not frame.empty and "created_at" in frame.columns:
+            stamp = pd.to_datetime(frame["created_at"], errors="coerce").max()
+            if pd.notna(stamp):
+                last_seen = stamp.strftime("%H:%M")
+                break
 
-        with photo_col:
-            # A missing image file raised and took the whole app down on every
-            # page, since this block runs before navigation.
-            try:
-                st.image(
-                    "BifacialGrid.jpeg",
-                    caption="The bifacial array: four rows of four panels",
-                    use_container_width=True,
-                )
-            except Exception:
-                st.caption("Array photo unavailable (BifacialGrid.jpeg not found).")
+    hero(
+        title="Rooftop array, live",
+        subtitle=(
+            "Sixteen bifacial panels in four rows, each row bracketed by a "
+            "front reference sensor at either end. Irradiance on both faces, "
+            "module temperature, and panel meter output — sampled continuously."
+        ),
+        stats=[
+            ("Irradiance", f"{irr:,.0f}", "W/m²", "warm"),
+            ("Panel power", f"{power:,.2f}", "kW", "cool"),
+            ("Sensors reporting", f"{sensors_live}", "of 24", None),
+            ("Last sample", last_seen, "", None),
+        ],
+    )
+
+    # The array itself, lit by what each panel is producing. This is the thing
+    # worth looking at: a dark panel in a bright row is obvious at a glance,
+    # which no table of numbers manages.
+    power = {}
+    if not df_panel.empty and {"device_id", "active_power_kw"} <= set(df_panel.columns):
+        latest = (df_panel.sort_values("created_at")
+                  .groupby("device_id").tail(1))
+        for _, r in latest.iterrows():
+            dev = pd.to_numeric(r.get("device_id"), errors="coerce")
+            val = pd.to_numeric(r.get("active_power_kw"), errors="coerce")
+            if pd.notna(dev):
+                power[int(dev)] = float(val) * 1000 if pd.notna(val) else float("nan")
+    # Front reference sensors come from the Pi (Irr_1 .. Irr_24), not from the
+    # meters. While that logger is silent the rings stay hollow rather than
+    # showing zero -- "no sensor" and "no sunlight" must not look alike.
+    front = {}
+    if not df_live.empty:
+        last = df_live.iloc[-1]
+        for sid in (1, 6, 7, 12, 13, 18, 19, 24):
+            col = f"Irr_{sid}"
+            if col in df_live.columns:
+                v = pd.to_numeric(last.get(col), errors="coerce")
+                if pd.notna(v):
+                    front[sid] = float(v)
+
+    array_diagram(power, unit="W", title="Live output, panel by panel",
+                  front=front)
+
+    if df_live.empty:
+        feature_cards([
+            ("☀", "Front sensors", "Eight references, two per row, reading the "
+             "direct beam on the panel face.", "warm"),
+            ("◐", "Rear sensors", "Sixteen under-panel sensors reading light "
+             "reflected off the roof — the bifacial gain.", "cool"),
+            ("⌁", "Panel meters", "Voltage, current, power and cumulative "
+             "energy per string.", "cool"),
+            ("◷", "Continuous log", "Samples pushed to the database and synced "
+             "to Drive for reporting.", "warm"),
+        ])
 
 
 # -------------------------
@@ -150,8 +196,8 @@ def render_overview(expanded: bool):
 # -------------------------
 pages = [
     st.Page(render_live_monitoring, title="Live Monitoring", icon="📡"),
-    st.Page(render_alerts, title="Alerts", icon="🚨"),
     st.Page(render_panel_array, title="Panel Array", icon="🔲"),
+    st.Page(render_anomalies, title="Anomalies", icon="⚠️"),
     st.Page(render_irradiance_tracker, title="Irradiance Tracker", icon="📈"),
     st.Page(render_data_reports, title="Data & Reports", icon="📁"),
 ]
@@ -161,7 +207,9 @@ if st.session_state.user_role == "admin":
 
 nav = st.navigation(pages)
 
+# Shown above every page: an empty chart means one of two very different
+# things, and this says which before you read a single number.
 render_overview(expanded=(nav.title != "Live Monitoring"))
-st.divider()
+solar_day_bar()
 
 nav.run()
