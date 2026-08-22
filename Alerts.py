@@ -1,28 +1,11 @@
-
-Anomalies · PY
 import streamlit as st
 import pandas as pd
 import numpy as np
- 
-from ui_sections import (
-    require_login,
-    page_stamp,
-    supabase,
-    email_alerts_configured,
-    send_alert_email,
-    get_seen_log_alert_hashes,
-    mark_log_alerts_seen,
-)
+
+from ui_sections import require_login, page_stamp, supabase
 import pv_gapfill as G
 import detector as D
-import hashlib
- 
-# state_id=2 in the shared log_alert_state table — id=1 is the log-file
-# Alerts page, this page gets its own row so the two don't collide.
-# Run once, alongside the id=1 row from the log Alerts page:
-#     insert into log_alert_state (id, seen_hashes) values (2, '[]');
-ANOMALY_STATE_ID = 2
- 
+
 # How many rows Supabase returns per request. It caps responses, so a week of
 # 20 meters at ~1,400 samples/day has to be pulled in pages rather than one go.
 # Supabase returns at most 1,000 rows per request, so long periods mean many
@@ -37,13 +20,13 @@ ANOMALY_STATE_ID = 2
 # panel per day against the 200 the checks require.
 PAGE_SIZE = 1000
 MAX_ROWS = 400_000          # hard ceiling, whatever the period asks for
- 
+
 SEVERITY_STYLE = {
     "high": ("🔴", "High"),
     "medium": ("🟠", "Medium"),
     "low": ("🔵", "Low"),
 }
- 
+
 FAULT_EXPLAIN = {
     "branch_diode": "Current far below peers while voltage stayed normal — the "
                     "signature of a failed Y-connector diode.",
@@ -55,20 +38,20 @@ FAULT_EXPLAIN = {
     "disconnection": "Both current and voltage gone — the panel is not connected.",
     "datetime": "A problem with the timestamps themselves rather than a reading.",
 }
- 
- 
+
+
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_panel_history(days: int, _progress=None) -> pd.DataFrame:
     """Pull recent panel_readings and reshape to the wide layout the detector
     expects.
- 
+
     Works backwards from now rather than forwards from a start date, so the
     most useful rows arrive first and a truncated fetch still covers the recent
     period rather than an arbitrary slice of the past.
     """
     since = pd.Timestamp.utcnow().tz_localize(None) - pd.Timedelta(days=days)
     rows, cursor, guard = [], None, 0
- 
+
     # Page by timestamp, not by offset.
     #
     # range(page*1000, ...) counts from the start of the result set, but rows
@@ -98,7 +81,7 @@ def fetch_panel_history(days: int, _progress=None) -> pd.DataFrame:
         rows.extend(batch)
         if _progress is not None:
             _progress(len(rows))
- 
+
         newest = max(r.get("created_at") for r in batch)
         nxt = pd.to_datetime(newest, errors="coerce", utc=True)
         if pd.isna(nxt):
@@ -110,28 +93,28 @@ def fetch_panel_history(days: int, _progress=None) -> pd.DataFrame:
         cursor = nxt
         if len(batch) < PAGE_SIZE:
             break
- 
+
     if not rows:
         return pd.DataFrame()
- 
+
     # Report what was actually retrieved. A short fetch looks exactly like a
     # logger outage once the rows are gridded -- missing rows become missing
     # minutes -- so the two have to be told apart before any finding about
     # "missing samples" can be trusted.
     st.session_state["_fetch_rows"] = len(rows)
- 
+
     d = pd.DataFrame(rows)
     d["ts"] = pd.to_datetime(d["created_at"], errors="coerce", utc=True).dt.tz_localize(None)
     d = d[d.ts.notna()]
     d["dev"] = pd.to_numeric(d["device_id"], errors="coerce")
     d = d[d.dev.notna()]
     d["dev"] = d["dev"].astype(int)
- 
+
     # Devices are polled in sequence, so one logical sample is spread over a
     # second or so of wall clock. Snap each burst to its start, or the detected
     # interval collapses and the grid becomes unusable.
     d = d.sort_values("ts")
- 
+
     # Group each poll burst into one logical sample.
     #
     # No threshold, because every threshold I tried failed on this data. Gap
@@ -147,11 +130,11 @@ def fetch_panel_history(days: int, _progress=None) -> pd.DataFrame:
     d = d.sort_values("ts").reset_index(drop=True)
     d["cycle"] = d.groupby("dev").cumcount()
     d["ts"] = d.groupby("cycle")["ts"].transform("first")
- 
+
     n_cycles = int(d["cycle"].nunique())
     span = (d.ts.max() - d.ts.min()).total_seconds()
     st.session_state["_fetch_cadence"] = round(span / max(n_cycles, 1), 1)
- 
+
     frames = []
     for src, short in (("voltage_v", "V"), ("current_a", "I"),
                        ("active_power_kw", "P"), ("forward_energy_kwh", "E")):
@@ -168,39 +151,8 @@ def fetch_panel_history(days: int, _progress=None) -> pd.DataFrame:
     out = out[~out.index.duplicated(keep="last")]
     out.index.name = "Timestamp"
     return out
- 
- 
-def _finding_hash(f: dict) -> str:
-    """Stable ID for one finding, used to avoid re-emailing the same
-    ongoing fault every time detection is re-run. Built from the
-    fields that identify *what* the fault is, not from anything that
-    changes run to run (like days_seen, which grows over time)."""
-    key = f"{f.get('panel')}:{f.get('type')}:{f.get('subtype')}:{f.get('first_day')}"
-    return hashlib.sha256(key.encode()).hexdigest()[:16]
- 
- 
-def _findings_to_alert_dicts(findings: list[dict]) -> list[dict]:
-    """Adapts anomaly findings to the shape send_alert_email() expects
-    (level/device/timestamp/message/hash) — the same email helper the
-    log-file Alerts page uses, so there's one email code path, not two."""
-    out = []
-    for f in findings:
-        severity = f.get("severity", "low")
-        level = {"high": "CRITICAL", "medium": "ERROR", "low": "WARNING"}.get(severity, "WARNING")
-        panel = f.get("panel")
-        device = f"Panel {panel}" if panel else f.get("subtype", "Timestamps")
-        fault_type = f.get("type", "").replace("_", " ")
-        detail = f.get("detail", "")
-        out.append({
-            "hash": _finding_hash(f),
-            "level": level,
-            "device": device,
-            "timestamp": f.get("first_day"),
-            "message": f"{fault_type} — {detail}",
-        })
-    return out
- 
- 
+
+
 def _render_findings(records, empty_message):
     if not records:
         st.success(empty_message)
@@ -225,8 +177,8 @@ def _render_findings(records, empty_message):
                     st.caption(f"{f['first_day']} → {f['last_day']}")
             with st.expander("Numbers behind this"):
                 st.json({k: v for k, v in f.items() if k != "detail"})
- 
- 
+
+
 def render_anomalies():
     require_login()
     page_stamp("Anomalies")
@@ -236,19 +188,7 @@ def render_anomalies():
         "same type, at the same moment. Weather affects them all equally, so a "
         "panel that stands out is standing out for its own reasons."
     )
- 
-    if not email_alerts_configured():
-        st.caption(
-            "Email/SMS digest isn't configured yet — see send_alert_email()'s "
-            "docstring in ui_sections.py for the secrets needed."
-        )
-    auto_email = st.toggle(
-        "Email/SMS me confirmed findings after each run",
-        value=email_alerts_configured(),
-        disabled=not email_alerts_configured(),
-        key="anomalies_auto_email",
-    )
- 
+
     left, right = st.columns([1, 2])
     with left:
         days = st.number_input(
@@ -258,17 +198,17 @@ def render_anomalies():
                  "a finding be confirmed rather than left provisional.")
     with right:
         st.caption(" ")
-        go = st.button("Run detection", type="primary", width='stretch')
- 
+        go = st.button("Run detection", type="primary", use_container_width=True)
+
     if go:
         status = st.status(f"Reading the last {days} day(s)…", expanded=True)
         with status:
             note = st.empty()
             note.write("Fetching from the database in pages of 1,000…")
- 
+
             def tick(n):
                 note.write(f"Fetched {n:,} readings…")
- 
+
             wide = fetch_panel_history(int(days), _progress=tick)
             note.write(f"Fetched {len(wide):,} samples. Checking every panel…")
             if wide.empty:
@@ -282,32 +222,13 @@ def render_anomalies():
             status.update(label=f"Checked {len(wide):,} samples",
                           state="complete", expanded=False)
         st.session_state["_anom"] = (confirmed, provisional, len(wide), int(days))
- 
-        # Email only CONFIRMED findings (provisional are explicitly "worth
-        # watching, not yet worth acting on" per the caption below), and only
-        # ones not already emailed for this same underlying fault.
-        if auto_email and email_alerts_configured() and confirmed:
-            alert_dicts = _findings_to_alert_dicts(confirmed)
-            seen = get_seen_log_alert_hashes(state_id=ANOMALY_STATE_ID)
-            new_alerts = [a for a in alert_dicts if a["hash"] not in seen]
-            if new_alerts:
-                sent, msg = send_alert_email(new_alerts)
-                if sent:
-                    st.success(f"Emailed {len(new_alerts)} new confirmed finding(s). {msg}")
-                else:
-                    st.error(f"Couldn't send the alert email: {msg}")
-                if not mark_log_alerts_seen({a["hash"] for a in new_alerts}, state_id=ANOMALY_STATE_ID):
-                    st.warning(
-                        "Couldn't record these as emailed (Supabase write failed) "
-                        "— they may be re-sent next run."
-                    )
- 
+
     if "_anom" not in st.session_state:
         st.info("Choose a period and select **Run detection** to check the array.")
         return
- 
+
     confirmed, provisional, n_rows, used_days = st.session_state["_anom"]
- 
+
     got = st.session_state.get("_fetch_rows", 0)
     devices = st.session_state.get("_fetch_devices", 20)
     expected = int(used_days * 24 * 60 * devices)   # one sample per device per minute
@@ -319,7 +240,7 @@ def render_anomalies():
             f"“missing samples” may be this short fetch rather than a real "
             f"logger outage. Try fewer days."
         )
- 
+
     a, b, c = st.columns(3)
     a.metric("Samples checked", f"{n_rows:,}")
     cad = st.session_state.get("_fetch_cadence")
@@ -328,13 +249,13 @@ def render_anomalies():
     b.metric("Panel faults", len([f for f in confirmed
                                    if f.get("type") != "datetime"]))
     c.metric("Provisional", len(provisional))
- 
+
     # Timestamp problems are counted over the whole period rather than per day,
     # so showing them under a "seen on at least N days" heading contradicts
     # itself. They get their own section.
     data_faults = [f for f in confirmed if f.get("type") == "datetime"]
     panel_faults = [f for f in confirmed if f.get("type") != "datetime"]
- 
+
     if data_faults:
         st.divider()
         st.subheader("Data quality")
@@ -343,7 +264,7 @@ def render_anomalies():
             "duplicated or impossible timestamps, counted across the whole period."
         )
         _render_findings(data_faults, "")
- 
+
     st.divider()
     st.subheader("Confirmed")
     st.caption(
@@ -355,7 +276,7 @@ def render_anomalies():
         f"No panel faults confirmed across {used_days} day(s). Either the array "
         f"is healthy, or there aren't enough days yet to establish a pattern."
     )
- 
+
     if provisional:
         st.divider()
         st.subheader("Provisional")
@@ -364,7 +285,7 @@ def render_anomalies():
             f"worth acting on."
         )
         _render_findings(provisional, "")
- 
+
     st.divider()
     with st.expander("What this will never flag, and why"):
         st.markdown(
@@ -373,7 +294,7 @@ def render_anomalies():
 modules in block B5. That gap *is* the bifacial gain — it is the measurement
 this project exists to make, not a fault. Panels are only ever compared against
 others of the same type.
- 
+
 **Every panel dipping to two-thirds voltage each morning.** At low sun angles
 each block shades the one behind it. Panel 14 does this about 3% of the time and
 panel 20 twice as often, so a rule like "flag anything below 32 V" would report
@@ -381,7 +302,7 @@ the whole array as broken every sunrise. The diode test therefore requires the
 behaviour to hold for a large share of the day, which shadows never reach.
             """
         )
- 
+
     if st.session_state.get("user_role") == "admin" and (confirmed or provisional):
         if st.button("Save these findings to the database"):
             ok = D.push_to_supabase(confirmed, provisional, client=supabase)
@@ -392,4 +313,3 @@ behaviour to hold for a large share of the day, which shadows never reach.
                     "Couldn't save. The sensor_anomalies table may not exist "
                     "yet — the CREATE TABLE statement is in ANOMALY_SETUP.md."
                 )
- 
