@@ -3,7 +3,8 @@ import pandas as pd
 
 from ui_sections import (
     require_login,
-    page_stamp,import streamlit as st
+    page_stamp
+    import streamlit as st
 import pandas as pd
 
 from ui_sections import (
