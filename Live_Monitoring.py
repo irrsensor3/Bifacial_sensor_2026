@@ -1,6 +1,5 @@
 import streamlit as st
 import pandas as pd
-from streamlit_autorefresh import st_autorefresh
 
 from ui_sections import (
     require_login,
@@ -19,6 +18,25 @@ from drive_fetch import (
     list_available_dcm_csvs,
     download_and_combine_dcm_csvs,
 )
+
+
+def st_autorefresh_builtin(seconds: int):
+    """Re-run the page every `seconds`, using whatever the installed Streamlit
+    provides. st.autorefresh exists on newer builds; older ones fall back to a
+    timed fragment. Either way there is no third-party component to break."""
+    if hasattr(st, "autorefresh"):
+        st.autorefresh(interval=seconds * 1000, key="live_refresh")
+        return
+
+    @st.fragment(run_every=seconds)
+    def _tick():
+        st.caption(" ")
+
+    try:
+        _tick()
+    except Exception:
+        # Very old Streamlit: leave the manual Refresh button as the only path.
+        pass
 
 
 def render_live_monitoring():
@@ -43,11 +61,15 @@ def render_live_monitoring():
             "Refresh every (seconds)", 5, 60, 15,
             disabled=not auto_refresh, key="live_refresh_secs",
         )
+    # streamlit-autorefresh is an unmaintained third-party component and does
+    # not load on Streamlit 1.6x -- it showed a yellow "trouble loading the
+    # component" banner and never refreshed. Streamlit has had this built in
+    # since 1.37, so the dependency is gone.
     if auto_refresh:
-        st_autorefresh(interval=refresh_seconds * 1000, key="live_refresh")
-    else:
-        if st.button("Refresh now"):
-            st.rerun()
+        st_autorefresh_builtin(refresh_seconds)
+    if st.button("Refresh now"):
+        st.cache_data.clear()
+        st.rerun()
 
     df_live = fetch_latest_readings()
 
@@ -70,18 +92,10 @@ def render_live_monitoring():
             num = pd.to_numeric(val, errors="coerce")
             return f"{num:,.{places}f} {unit}" if pd.notna(num) else "no reading"
 
-        # Display irradiance metrics in rows of 3, each in a bordered container
         shown = irr_cols[:4]
-        cols_per_row = 3
-        for row_start in range(0, len(shown), cols_per_row):
-            row_end = min(row_start + cols_per_row, len(shown))
-            cols = st.columns(row_end - row_start)
-            for col_idx, col in enumerate(cols):
-                actual_idx = row_start + col_idx
-                with cols[col_idx]:
-                    with st.container(border=True):
-                        st.metric(shown[actual_idx].replace("_", " "), _fmt(latest[shown[actual_idx]], "W/m²"))
-        
+        cols = st.columns(max(len(shown), 1))
+        for i, col in enumerate(shown):
+            cols[i].metric(col.replace("_", " "), _fmt(latest[col], "W/m²"))
         if len(irr_cols) > 4:
             st.caption(
                 f"Showing 4 of {len(irr_cols)} sensors. The full set is in the "
@@ -267,46 +281,34 @@ def render_live_monitoring():
         latest_overall = df_panel.iloc[-1]
         st.caption(f"Last update: {latest_overall['created_at']}")
 
-        # Display DC meters in 2 columns per row, with each meter having 2 rows of data
-        devices = list(latest_per_device.iterrows())
-        for row_idx in range(0, len(devices), 2):
-            cols = st.columns(2)
-            for col_idx in range(2):
-                device_pos = row_idx + col_idx
-                if device_pos < len(devices):
-                    _, row = devices[device_pos]
-                    device_label = f"Meter {int(row['device_id'])}"
-                    has_error = row.get("error") not in (None, "No error")
+        for _, row in latest_per_device.iterrows():
+            device_label = f"Meter {int(row['device_id'])}"
+            has_error = row.get("error") not in (None, "No error")
 
-                    def _m(val, unit, places=1):
-                        num = pd.to_numeric(val, errors="coerce")
-                        return f"{num:,.{places}f} {unit}" if pd.notna(num) else "no reading"
+            def _m(val, unit, places=1):
+                num = pd.to_numeric(val, errors="coerce")
+                return f"{num:,.{places}f} {unit}" if pd.notna(num) else "no reading"
 
-                    with cols[col_idx]:
-                        # Use container with border for each meter card
-                        with st.container(border=True):
-                            # First row: Title and status
-                            st.markdown(
-                                f"**{device_label}**  \n"
-                                + ("⚠️ Fault" if has_error else "OK")
-                            )
-                            
-                            # Second row: Voltage and Current side by side
-                            metric_cols_1 = st.columns(2)
-                            with metric_cols_1[0]:
-                                st.metric("Voltage", _m(row.get("voltage_v"), "V"))
-                            with metric_cols_1[1]:
-                                st.metric("Current", _m(row.get("current_a"), "A", 2))
-                            
-                            # Third row: Power and Energy side by side
-                            metric_cols_2 = st.columns(2)
-                            with metric_cols_2[0]:
-                                st.metric("Power", _m(row.get("active_power_kw"), "kW", 3))
-                            with metric_cols_2[1]:
-                                st.metric("Energy", _m(row.get("forward_energy_kwh"), "kWh"))
+            # Status spelled out, not carried by a coloured dot alone.
+            # Five equal columns squeezed the numbers off-screen on a narrow
+            # window; the label column is now wider and the meters share the
+            # rest, so the readings stay visible.
+            # Label on its own line, readings in four equal columns. As one
+            # five-column row the label ate the width on desktop and, once the
+            # columns wrapped on a phone, the readings ran together with no
+            # visual break between one meter and the next.
+            state = ('<span class="state bad">Fault</span>' if has_error
+                     else '<span class="state ok">OK</span>')
+            st.markdown(f'<div class="meter-head">{device_label}{state}</div>',
+                        unsafe_allow_html=True)
+            cols = st.columns(4)
+            cols[0].metric("Voltage", _m(row.get("voltage_v"), "V"))
+            cols[1].metric("Current", _m(row.get("current_a"), "A", 2))
+            cols[2].metric("Power", _m(row.get("active_power_kw"), "kW", 3))
+            cols[3].metric("Energy", _m(row.get("forward_energy_kwh"), "kWh"))
 
-                            if has_error:
-                                st.caption(f"{device_label} reported: {row.get('error')}")
+            if has_error:
+                st.caption(f"{device_label} reported: {row.get('error')}")
 
         # -------------------------
         # Append historical DC meter data onto this same chart
