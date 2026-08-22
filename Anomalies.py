@@ -225,7 +225,7 @@ def render_anomalies():
                  "a finding be confirmed rather than left provisional.")
     with right:
         st.caption(" ")
-        go = st.button("Run detection", type="primary", use_container_width=True)
+        go = st.button("Run detection", type="primary", width="stretch")
 
     if go:
         status = st.status(f"Reading the last {days} day(s)…", expanded=True)
