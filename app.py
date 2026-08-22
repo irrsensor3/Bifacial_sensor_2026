@@ -1,13 +1,8 @@
 import streamlit as st
 import pandas as pd
-
 from ui_sections import (
     require_login,
-    page_stamp
-    import streamlit as st
-import pandas as pd
-
-from ui_sections import (
+    page_stamp,
     login,
     inject_theme,
     solar_day_bar,
