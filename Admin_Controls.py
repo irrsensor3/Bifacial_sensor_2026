@@ -1,215 +1,154 @@
 import streamlit as st
-import pandas as pd
 
 from ui_sections import (
-    login,
-    inject_theme,
-    solar_day_bar,
-    hero,
-    feature_cards,
-    array_diagram,
-    plot_gauge,
-    fetch_latest_readings,
-    fetch_latest_panel_readings,
-)
-from Data_and_Reports import render_data_reports
-from Live_Monitoring import render_live_monitoring
-from Admin_Controls import render_admin_controls
-from Irradiance_Tracker import render_irradiance_tracker
-from Panel_Array import render_panel_array
-from Anomalies import render_anomalies
-
-MAX_IRRADIANCE = 1200   # W/m², matches Irradiance_Tracker.py
-PANEL_CAPACITY_KW = 10  # adjust to your actual inverter/array capacity
-
-st.set_page_config(
-    page_title="Bifacial PV Data Logging System",
-    page_icon="📊",
-    layout="wide",
+    require_login,
+    page_stamp,
+    supabase,
+    get_forced_sensors,
+    set_sensor_force,
+    NUM_SENSORS,
 )
 
-inject_theme()
 
-# -------------------------
-# Authentication / session
-# -------------------------
-if "auth" not in st.session_state:
-    st.session_state.auth = False
-    st.session_state.user_role = None
+def render_admin_controls():
+    require_login(role="admin")
 
-if not st.session_state.auth:
-    login()
-    st.stop()
+    page_stamp("Admin Controls")
+    st.title("Admin controls")
 
-st.sidebar.subheader("Session")
-# (user_role or 'unknown') — .capitalize() on None raised AttributeError
-# whenever the session was half-initialised, e.g. a stale tab left open
-# across a redeploy.
-st.sidebar.write(f"Signed in as {(st.session_state.user_role or 'unknown').capitalize()}")
-
-if st.sidebar.button("Sign out", use_container_width=True):
-    st.session_state.auth = False
-    st.session_state.user_role = None
-    st.rerun()
-
-
-# -------------------------
-# Overview strip: live gauges + array photo.
-#
-# Collapsible, and collapsed on Live Monitoring which already shows this data
-# in more detail. It costs two Supabase reads on every page load and used to
-# push each page's real content below the fold.
-# -------------------------
-def _average_irradiance(df_live: pd.DataFrame) -> float:
-    """Mean irradiance across recent rows and all sensors.
-
-    A single row can have gaps where a sensor did not report, so forward-fill
-    before averaging over both axes.
-    """
-    if df_live.empty:
-        return 0.0
-    irr_cols = [c for c in df_live.columns if c.startswith("Irr_")]
-    if not irr_cols:
-        return 0.0
-    recent = df_live[irr_cols].apply(pd.to_numeric, errors="coerce").ffill()
-    if recent.empty:
-        return 0.0
-    # The original wrapped this in a bare `except Exception` whose fallback
-    # could never run — stack() only fails on an empty frame, handled above.
-    # Broad excepts here hid real errors behind a plausible-looking zero.
-    mean_val = recent.stack().mean()
-    return float(mean_val) if pd.notna(mean_val) else 0.0
-
-
-def _average_power(df_panel: pd.DataFrame) -> float:
-    if df_panel.empty or "active_power_kw" not in df_panel.columns:
-        return 0.0
-    recent = pd.to_numeric(df_panel["active_power_kw"], errors="coerce").ffill()
-    if recent.empty:
-        return 0.0
-    mean_power = recent.mean()
-    if pd.isna(mean_power):
-        return 0.0
-    mean_power = float(mean_power)
-    # Fallback if the column is populated in watts despite its name.
-    if mean_power > 1000:
-        mean_power /= 1000.0
-    return mean_power
-
-
-def render_overview(expanded: bool):
-    """The banner every page opens with: photo, headline, live figures.
-
-    This replaced two Plotly gauges and a floating photo. The gauges took a
-    third of the screen to show one number each, and the number was the only
-    part anyone read -- so the numbers are now the design, at a size you can
-    take in from across a desk.
-    """
-    df_live = fetch_latest_readings(limit=5)
-    # 200 rows, not 5: the diagram needs at least one recent reading per meter,
-    # and the logger polls all 20 in sequence. With only 5 rows most panels
-    # would render unlit and the array would look half-dead.
-    df_panel = fetch_latest_panel_readings(limit=200)
-
-    irr = _average_irradiance(df_live)
-    power = _average_power(df_panel)
-
-    sensors_live = 0
-    if not df_live.empty:
-        irr_cols = [c for c in df_live.columns if c.startswith("Irr_")]
-        if irr_cols:
-            sensors_live = int(
-                df_live[irr_cols].apply(pd.to_numeric, errors="coerce")
-                .iloc[-1].notna().sum()
-            )
-
-    last_seen = "—"
-    for frame in (df_live, df_panel):
-        if not frame.empty and "created_at" in frame.columns:
-            stamp = pd.to_datetime(frame["created_at"], errors="coerce").max()
-            if pd.notna(stamp):
-                last_seen = stamp.strftime("%H:%M")
-                break
-
-    hero(
-        title="Rooftop array, live",
-        subtitle=(
-            "Sixteen bifacial panels in four rows, each row bracketed by a "
-            "front reference sensor at either end. Irradiance on both faces, "
-            "module temperature, and panel meter output — sampled continuously."
-        ),
-        stats=[
-            ("Irradiance", f"{irr:,.0f}", "W/m²", "warm"),
-            ("Panel power", f"{power:,.2f}", "kW", "cool"),
-            ("Sensors reporting", f"{sensors_live}", "of 24", None),
-            ("Last sample", last_seen, "", None),
-        ],
+    # -------------------------
+    # Power controls
+    # -------------------------
+    st.subheader("Power controls")
+    st.caption(
+        "These act on the logger. A shutdown needs someone on site to power the "
+        "Pi back on, and logging stops until they do."
     )
 
-    # The array itself, lit by what each panel is producing. This is the thing
-    # worth looking at: a dark panel in a bright row is obvious at a glance,
-    # which no table of numbers manages.
-    power = {}
-    if not df_panel.empty and {"device_id", "active_power_kw"} <= set(df_panel.columns):
-        latest = (df_panel.sort_values("created_at")
-                  .groupby("device_id").tail(1))
-        for _, r in latest.iterrows():
-            dev = pd.to_numeric(r.get("device_id"), errors="coerce")
-            val = pd.to_numeric(r.get("active_power_kw"), errors="coerce")
-            if pd.notna(dev):
-                power[int(dev)] = float(val) * 1000 if pd.notna(val) else float("nan")
-    # Front reference sensors come from the Pi (Irr_1 .. Irr_24), not from the
-    # meters. While that logger is silent the rings stay hollow rather than
-    # showing zero -- "no sensor" and "no sunlight" must not look alike.
-    front = {}
-    if not df_live.empty:
-        last = df_live.iloc[-1]
-        for sid in (1, 6, 7, 12, 13, 18, 19, 24):
-            col = f"Irr_{sid}"
-            if col in df_live.columns:
-                v = pd.to_numeric(last.get(col), errors="coerce")
-                if pd.notna(v):
-                    front[sid] = float(v)
+    def _send_command(command: str, label: str):
+        """Write a command for the Pi to pick up, reporting failure rather than
+        raising. An exception here used to dump a stack trace over the page and
+        leave you unsure whether the command had been sent."""
+        try:
+            # Table is pi_command (singular) — the name the database and the
+            # Pi both use. The site previously wrote to "pi_commands", which
+            # does not exist, so every power command silently went nowhere
+            # while still reporting success.
+            supabase.table("pi_command").update(
+                {"Command": command}
+            ).eq("id", 1).execute()
+            st.success(f"{label} sent. The Pi checks about once a minute.")
+        except Exception as exc:
+            st.error(f"{label} was NOT sent — the database write failed: {exc}")
 
-    array_diagram(power, unit="W", title="Live output, panel by panel",
-                  front=front)
+    # Two-step confirmation. These fired on a single click before, so one
+    # mis-click took the logger offline with no way to cancel.
+    for cmd, label, warning in (
+        ("reboot", "Reboot",
+         "The logger stops for about a minute, then comes back on its own."),
+        ("shutdown", "Shut down",
+         "The logger stops and stays off until someone powers it on physically."),
+    ):
+        pending = f"_confirm_{cmd}"
+        with st.container(border=True):
+            st.markdown(f"**{label} the Raspberry Pi**")
+            st.caption(warning)
+            if not st.session_state.get(pending):
+                if st.button(f"{label} the logger", key=f"{cmd}_start"):
+                    st.session_state[pending] = True
+                    st.rerun()
+            else:
+                st.warning(f"Confirm: {label.lower()} the logger now?")
+                yes, no = st.columns(2)
+                with yes:
+                    if st.button(f"Yes, {label.lower()} now", key=f"{cmd}_yes",
+                                 type="primary", use_container_width=True):
+                        _send_command(cmd, f"{label} command")
+                        st.session_state[pending] = False
+                with no:
+                    if st.button("Cancel", key=f"{cmd}_no", use_container_width=True):
+                        st.session_state[pending] = False
+                        st.rerun()
 
-    if df_live.empty:
-        feature_cards([
-            ("☀", "Front sensors", "Eight references, two per row, reading the "
-             "direct beam on the panel face.", "warm"),
-            ("◐", "Rear sensors", "Sixteen under-panel sensors reading light "
-             "reflected off the roof — the bifacial gain.", "cool"),
-            ("⌁", "Panel meters", "Voltage, current, power and cumulative "
-             "energy per string.", "cool"),
-            ("◷", "Continuous log", "Samples pushed to the database and synced "
-             "to Drive for reporting.", "warm"),
-        ])
+    # -------------------------------------------------
+    # FORCE LOGGING BELOW 0°C — per sensor (1-24)
+    # -------------------------------------------------
+    st.divider()
+    st.subheader("Logging below 0 °C")
+    st.caption(
+        "By default a reading below 0 °C is discarded as invalid. Turn a sensor "
+        "on here to keep those readings anyway. Sensors set to keep logging are "
+        "marked ON and filled; the rest are outlined. The Pi checks this about "
+        "once a minute, so a change can take up to a minute to apply."
+    )
 
+    forced_sensors = get_forced_sensors()
 
-# -------------------------
-# Pages — passed as functions, not file paths, so there's no path resolution
-# to break no matter what the files are named or where they live.
-#
-# Ordered by how often they're opened: the live view is what someone checks on
-# arrival, reports are occasional. The first entry is also the landing page.
-# -------------------------
-pages = [
-    st.Page(render_live_monitoring, title="Live Monitoring", icon="📡"),
-    st.Page(render_panel_array, title="Panel Array", icon="🔲"),
-    st.Page(render_anomalies, title="Anomalies", icon="⚠️"),
-    st.Page(render_irradiance_tracker, title="Irradiance Tracker", icon="📈"),
-    st.Page(render_data_reports, title="Data & Reports", icon="📁"),
-]
+    # 6 columns x 4 rows = 24 sensor toggle buttons
+    SENSORS_PER_ROW = 6
+    for row_start in range(1, NUM_SENSORS + 1, SENSORS_PER_ROW):
+        row_ids = range(row_start, min(row_start + SENSORS_PER_ROW, NUM_SENSORS + 1))
+        cols = st.columns(SENSORS_PER_ROW)
+        for col, sid in zip(cols, row_ids):
+            is_forced = sid in forced_sensors
+            # State is carried by the text and the button variant, not colour
+            # alone, so it survives greyscale, colour blindness and readers.
+            with col:
+                if st.button(
+                    f"{sid} · ON" if is_forced else f"{sid}",
+                    key=f"force_btn_{sid}",
+                    use_container_width=True,
+                    type="primary" if is_forced else "secondary",
+                    help=(f"Sensor {sid} keeps logging below 0 °C. Select to stop."
+                          if is_forced else
+                          f"Sensor {sid} discards readings below 0 °C. Select to keep them."),
+                ):
+                    if set_sensor_force(sid, not is_forced):
+                        st.rerun()
+                    else:
+                        st.error(
+                            f"Sensor {sid} was not updated — the database write "
+                            f"failed. Check the connection and try again."
+                        )
 
-if st.session_state.user_role == "admin":
-    pages.append(st.Page(render_admin_controls, title="Admin Controls", icon="🛠️"))
+    if forced_sensors:
+        st.caption(
+            "Currently forced: " + ", ".join(str(s) for s in sorted(forced_sensors))
+        )
+    else:
+        st.caption("No sensors currently forced — sub-zero cutoff applies to all.")
 
-nav = st.navigation(pages)
+    # -------------------------
+    # Diagnostics
+    # -------------------------
+    st.divider()
+    st.subheader("Diagnostics")
+    st.caption("Checks the app can reach the database. Does not touch the logger.")
 
-# Shown above every page: an empty chart means one of two very different
-# things, and this says which before you read a single number.
-render_overview(expanded=(nav.title != "Live Monitoring"))
-solar_day_bar()
-
-nav.run()
+    # The old check wrote command="hello" into pi_commands -- the same row the
+    # Pi polls for reboot and shutdown. Writing junk into a command channel to
+    # test connectivity is asking for trouble; read instead.
+    if st.button("Check database connection"):
+        try:
+            res = supabase.table("pi_settings").select("id").eq("id", 1).execute()
+            cmd = supabase.table("pi_command").select("Command").eq("id", 1).execute()
+            if res.data and cmd.data:
+                pending = (cmd.data[0].get("Command") or "").strip()
+                if pending:
+                    st.warning(
+                        f"Connected, but a '{pending}' command is still queued. "
+                        f"Either the Pi has not picked it up yet, or it is not "
+                        f"running the version that reads commands."
+                    )
+                else:
+                    st.success("Connected. Settings and command rows found.")
+            elif res.data:
+                st.warning("Connected, but pi_command has no row with id = 1. "
+                           "Power controls will not reach the Pi.")
+            else:
+                st.warning(
+                    "Connected, but pi_settings has no row with id = 1. Sensor "
+                    "toggles will not persist until that row exists."
+                )
+        except Exception as exc:
+            st.error(f"Could not reach the database: {exc}")
