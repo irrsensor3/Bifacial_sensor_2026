@@ -16,15 +16,6 @@ DRIVE_FOLDER_NAME = "bifacial-data"
 # per meter device (e.g. dcm_3366)
 DCM_DRIVE_FOLDER_NAME = "panel-meter-data"
 
-# Separate Drive folder for the mini PC's Modbus device logs —
-# organized as <root>/<device_id>/YYYY-MM-DD.log (e.g.
-# panel-meter-logs/dcm_3366/2026-08-20.log) — one subfolder per
-# device, no separate year/month levels since the date is in the
-# filename. Confirmed against the actual Drive layout, not a guess.
-# NOTE: this is the mini PC's logs only so far — wherever the
-# Raspberry Pi's own logs land (if anywhere yet) isn't covered here.
-LOG_DRIVE_FOLDER_NAME = "panel-meter-logs"
-
 SCOPES = ["https://www.googleapis.com/auth/drive.readonly"]
 
 
@@ -57,16 +48,15 @@ def _get_folder_id(service, folder_name=DRIVE_FOLDER_NAME):
     return files[0]["id"]
 
 
-def _find_all_files_recursive(service, root_folder_id, extension=".csv"):
+def _find_all_csvs_recursive(service, root_folder_id):
     """Walks the folder tree starting at root_folder_id (breadth-first)
-    and collects every file ending in `extension` found at any depth —
-    needed because the Pi logger organizes files into
-    <root>/<year>/<month>/*.ext rather than dropping them flat in the
-    top-level folder. Each returned entry gets a "folder_path" list
-    (e.g. ["2026", "07"]) recording which subfolders it was found
-    under, so callers can group files by year/device without guessing
-    from filenames or Drive's modifiedTime."""
-    matches = []
+    and collects every CSV found at any depth — needed because the Pi
+    logger organizes files into <root>/<year>/<month>/*.csv rather than
+    dropping them flat in the top-level folder. Each returned entry
+    gets a "folder_path" list (e.g. ["2026", "07"]) recording which
+    subfolders it was found under, so callers can group files by year
+    without guessing from filenames or Drive's modifiedTime."""
+    csv_files = []
     folders_to_search = [(root_folder_id, [])]
 
     while folders_to_search:
@@ -84,16 +74,11 @@ def _find_all_files_recursive(service, root_folder_id, extension=".csv"):
         for entry in res.get("files", []):
             if entry["mimeType"] == "application/vnd.google-apps.folder":
                 folders_to_search.append((entry["id"], path_parts + [entry["name"]]))
-            elif entry["name"].lower().endswith(extension):
+            elif entry["name"].lower().endswith(".csv"):
                 entry["folder_path"] = path_parts
-                matches.append(entry)
+                csv_files.append(entry)
 
-    return matches
-
-
-def _find_all_csvs_recursive(service, root_folder_id):
-    """Back-compat wrapper — CSV-specific callers unchanged."""
-    return _find_all_files_recursive(service, root_folder_id, ".csv")
+    return csv_files
 
 
 @st.cache_data(ttl=60)
@@ -278,62 +263,3 @@ def download_and_combine_dcm_csvs(file_ids: tuple) -> pd.DataFrame:
     if not dfs:
         return pd.DataFrame()
     return _standardize_dcm_columns(pd.concat(dfs, ignore_index=True))
-
-
-# =========================
-# DEVICE LOGS (device-logs) — .log files from the Pi and mini PC,
-# scanned for the alert system. Kept as plain text rather than parsed
-# into a DataFrame, since log lines aren't naturally tabular.
-# =========================
-
-@st.cache_data(ttl=60)
-def list_available_log_files():
-    """Lists every .log file anywhere under the 'device-logs' Drive
-    folder (whatever subfolder structure it uses — device/year/month
-    or otherwise, same recursive walk as the CSV listers). Returns an
-    empty list (rather than raising) on any failure."""
-    try:
-        service = _get_drive_service()
-        folder_id = _get_folder_id(service, LOG_DRIVE_FOLDER_NAME)
-        if folder_id is None:
-            return []
-
-        files = _find_all_files_recursive(service, folder_id, ".log")
-        files.sort(key=lambda f: f.get("modifiedTime", ""), reverse=True)
-        return files
-    except Exception as e:
-        st.session_state["_log_drive_list_error"] = str(e)
-        return []
-
-
-@st.cache_data(ttl=60)
-def download_log_text(file_id: str) -> str:
-    """Downloads a single .log file's raw text content. Cached briefly
-    since the same file may be re-scanned across reruns while the
-    Alerts page is open. Returns "" on failure rather than raising, so
-    one unreadable file doesn't stop the rest of the scan."""
-    try:
-        service = _get_drive_service()
-        request = service.files().get_media(fileId=file_id)
-        buffer = io.BytesIO()
-        downloader = MediaIoBaseDownload(buffer, request)
-        done = False
-        while not done:
-            _, done = downloader.next_chunk()
-        buffer.seek(0)
-        return buffer.read().decode("utf-8", errors="replace")
-    except Exception:
-        return ""
-
-
-def device_label_for(file_entry: dict) -> str:
-    """Best-effort device name for a log file — the first non-numeric
-    folder segment (e.g. 'dcm_3366' or 'tp_700' in
-    <root>/<device_id>/YYYY-MM-DD.log). Falls back to the filename if
-    the folder structure doesn't have one."""
-    path = file_entry.get("folder_path") or []
-    for part in path:
-        if part.isdigit() and (len(part) == 4 or len(part) == 2):
-            continue
-        return part
-    return file_entry.get("name", "unknown device")
