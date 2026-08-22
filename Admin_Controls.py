@@ -30,8 +30,12 @@ def render_admin_controls():
         raising. An exception here used to dump a stack trace over the page and
         leave you unsure whether the command had been sent."""
         try:
-            supabase.table("pi_commands").update(
-                {"command": command}
+            # Table is pi_command (singular) — the name the database and the
+            # Pi both use. The site previously wrote to "pi_commands", which
+            # does not exist, so every power command silently went nowhere
+            # while still reporting success.
+            supabase.table("pi_command").update(
+                {"Command": command}
             ).eq("id", 1).execute()
             st.success(f"{label} sent. The Pi checks about once a minute.")
         except Exception as exc:
@@ -127,8 +131,20 @@ def render_admin_controls():
     if st.button("Check database connection"):
         try:
             res = supabase.table("pi_settings").select("id").eq("id", 1).execute()
-            if res.data:
-                st.success("Connected. Settings row found.")
+            cmd = supabase.table("pi_command").select("Command").eq("id", 1).execute()
+            if res.data and cmd.data:
+                pending = (cmd.data[0].get("Command") or "").strip()
+                if pending:
+                    st.warning(
+                        f"Connected, but a '{pending}' command is still queued. "
+                        f"Either the Pi has not picked it up yet, or it is not "
+                        f"running the version that reads commands."
+                    )
+                else:
+                    st.success("Connected. Settings and command rows found.")
+            elif res.data:
+                st.warning("Connected, but pi_command has no row with id = 1. "
+                           "Power controls will not reach the Pi.")
             else:
                 st.warning(
                     "Connected, but pi_settings has no row with id = 1. Sensor "
