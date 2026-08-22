@@ -104,7 +104,7 @@ def login():
                 disabled=locked > 0,
             )
             if st.button("Sign in as admin", disabled=locked > 0,
-                         use_container_width=True):
+                         width='stretch'):
                 if check_password(password):
                     st.session_state.auth = True
                     st.session_state.user_role = "admin"
@@ -127,7 +127,7 @@ def login():
         with st.container(border=True):
             st.subheader("Guest")
             st.caption("View live readings, charts and reports. No password needed.")
-            if st.button("Continue as guest", use_container_width=True):
+            if st.button("Continue as guest", width='stretch'):
                 st.session_state.auth = True
                 st.session_state.user_role = "guest"
                 st.rerun()
@@ -299,6 +299,35 @@ def inject_theme():
             border-radius: 20px;
             padding: 4px 14px;
             margin-bottom: 0.6rem;
+        }
+
+        /* Panel meter status line (Live Monitoring): device name plus an
+           explicit OK/Fault label. Text, not colour alone, carries the
+           meaning, matching the rest of the app's accessibility approach. */
+        .meter-head {
+            font-family: var(--font);
+            font-weight: 600;
+            font-size: 0.95rem;
+            color: var(--ink);
+            margin-bottom: 0.3rem;
+        }
+        .meter-head .state {
+            display: inline-block;
+            font-size: 0.72rem;
+            font-weight: 600;
+            letter-spacing: 0.03em;
+            text-transform: uppercase;
+            border-radius: 20px;
+            padding: 2px 10px;
+            margin-left: 0.5rem;
+        }
+        .meter-head .state.ok {
+            color: var(--green);
+            background-color: #DCFCE7;
+        }
+        .meter-head .state.bad {
+            color: #B91C1C;
+            background-color: #FEE2E2;
         }
 
         /* Auto-refresh means the page can move under someone who did not ask
@@ -553,7 +582,7 @@ def preview_report_content(df, report_title, observation, fig, df_dcm=None):
 
     # Metadata Table
     metadata_df = pd.DataFrame(report_data['metadata'], columns=["Field", "Value"]) if report_data['metadata'] else pd.DataFrame()
-    st.dataframe(metadata_df, use_container_width=True, hide_index=True)
+    st.dataframe(metadata_df, width='stretch', hide_index=True)
 
     # Column Overview
     st.markdown("## Column Overview")
@@ -563,7 +592,7 @@ def preview_report_content(df, report_title, observation, fig, df_dcm=None):
     st.markdown("## Numeric Summary")
     if report_data['numeric_summary']:
         summary_df = pd.DataFrame(report_data['numeric_summary'])
-        st.dataframe(summary_df, use_container_width=True, hide_index=True)
+        st.dataframe(summary_df, width='stretch', hide_index=True)
     else:
         st.info("No numeric columns found")
 
@@ -571,7 +600,7 @@ def preview_report_content(df, report_title, observation, fig, df_dcm=None):
     if report_data['dcm_summary']:
         st.markdown("## DC Meter Summary")
         dcm_df = pd.DataFrame(report_data['dcm_summary'])
-        st.dataframe(dcm_df, use_container_width=True, hide_index=True)
+        st.dataframe(dcm_df, width='stretch', hide_index=True)
 
     # Weather Graph
     st.markdown("## Weather Graph")
@@ -911,12 +940,12 @@ def parse_log_alerts(log_text: str, filename: str, device: str) -> list[dict]:
 
 
 @st.cache_data(ttl=3)
-def _seen_log_alert_hashes_cached() -> frozenset:
+def _seen_alert_hashes_cached(state_id: int) -> frozenset:
     try:
         res = (
             supabase.table("log_alert_state")
             .select("seen_hashes")
-            .eq("id", 1)
+            .eq("id", state_id)
             .execute()
         )
         if res.data:
@@ -926,34 +955,38 @@ def _seen_log_alert_hashes_cached() -> frozenset:
     return frozenset()
 
 
-def get_seen_log_alert_hashes() -> set:
-    """Best-effort read of which log-alert line hashes have already
-    been surfaced/emailed. Returns an empty set (i.e. treat everything
-    as new) if the table/row doesn't exist yet or the request fails —
+def get_seen_log_alert_hashes(state_id: int = 1) -> set:
+    """Best-effort read of which alert hashes have already been
+    surfaced/emailed. Returns an empty set (i.e. treat everything as
+    new) if the table/row doesn't exist yet or the request fails —
     see the SQL below to create it.
 
-    Run this once in the Supabase SQL editor:
+    `state_id` lets more than one alert source share this same table
+    without colliding — the log-file Alerts page uses id=1 (the
+    default), the Anomalies page uses id=2, etc. Run this once in the
+    Supabase SQL editor, one insert per state_id you plan to use:
         create table log_alert_state (
             id int primary key,
             seen_hashes jsonb not null default '[]'::jsonb
         );
         insert into log_alert_state (id, seen_hashes) values (1, '[]');
+        insert into log_alert_state (id, seen_hashes) values (2, '[]');
     """
-    return set(_seen_log_alert_hashes_cached())
+    return set(_seen_alert_hashes_cached(state_id))
 
 
-def mark_log_alerts_seen(new_hashes: set) -> bool:
-    """Adds `new_hashes` to the seen set, capped to the most recent
-    2000 (a jsonb array with no cap would grow forever). Returns True
-    on success."""
+def mark_log_alerts_seen(new_hashes: set, state_id: int = 1) -> bool:
+    """Adds `new_hashes` to the seen set for `state_id`, capped to the
+    most recent 2000 (a jsonb array with no cap would grow forever).
+    Returns True on success."""
     try:
-        current = get_seen_log_alert_hashes()
+        current = get_seen_log_alert_hashes(state_id)
         current |= new_hashes
         capped = list(current)[-2000:]
         supabase.table("log_alert_state").update(
             {"seen_hashes": capped}
-        ).eq("id", 1).execute()
-        _seen_log_alert_hashes_cached.clear()
+        ).eq("id", state_id).execute()
+        _seen_alert_hashes_cached.clear()
         return True
     except Exception:
         return False
