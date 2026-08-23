@@ -81,7 +81,7 @@ def _load_range(period_files, download_fn, build_created_at, start_date, end_dat
 # Supabase refresh.  Live data can refresh every 15 seconds, while Drive is
 # checked only once every 5 minutes.  This prevents repeated Drive downloads
 # from blocking/crashing the Streamlit app.
-DRIVE_SYNC_INTERVAL_SECONDS = 300
+DRIVE_SYNC_INTERVAL_SECONDS = 1800
 
 
 def _sync_drive_history_if_due(
