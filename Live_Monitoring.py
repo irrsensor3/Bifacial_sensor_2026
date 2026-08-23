@@ -658,6 +658,7 @@ def render_live_monitoring():
             pivot_reset = pivot.reset_index()
             meter_cols = [c for c in pivot_reset.columns if c != "created_at"]
             # DEBUG
+            
             st.write("DEBUG selected devices:", selected_devices)
             st.write("DEBUG meter columns:", meter_cols)
             st.dataframe(pivot_reset.head(20))
