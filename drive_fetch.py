@@ -1,5 +1,6 @@
 
 import io
+import re
 from datetime import datetime
  
 import pandas as pd
@@ -407,38 +408,51 @@ def download_and_combine_csvs(file_entries: tuple) -> pd.DataFrame:
 @st.cache_data(ttl=1800)
 def list_available_dcm_csvs():
     """
-    Returns only DC meter CSV files located inside a valid
-    year/month folder structure under panel-meter-data.
+    Returns only the actual daily DCM CSV files.
 
-    Example accepted:
+    Accepted:
+        YYYY-MM-DD_dcm_3366_bifaical.csv
 
-        panel-meter-data/
-            dcm_3366/
-                2026/
-                    08/
-                        2026-08-23.csv
+    Ignored:
+        YYYY-MM-DD_dcm_3366_bifaical_avg.csv
+        and any other CSV files under panel-meter-data.
 
-    Example ignored:
-
-        panel-meter-data/alerts.csv
-        panel-meter-data/something.csv
+    The folder structure is still discovered recursively, but only
+    filenames matching the exact DCM daily-file pattern are returned.
     """
-
     try:
         service = _get_drive_service()
 
         folder_id = _get_folder_id(
             service,
-            DCM_DRIVE_FOLDER_NAME,
+            DCM_DRIVE_FOLDER_NAME
         )
 
         if folder_id is None:
             return []
 
-        files = _find_all_csvs_recursive(
+        all_files = _find_all_csvs_recursive(
             service,
-            folder_id,
+            folder_id
         )
+
+        # Exact filename pattern for the real DCM daily files.
+        #
+        # Example:
+        # 2026-08-23_dcm_3366_bifaical.csv
+        #
+        # This deliberately does NOT match:
+        # 2026-08-23_dcm_3366_bifaical_avg.csv
+        pattern = re.compile(
+            r"^\d{4}-\d{2}-\d{2}_dcm_3366_bifaical\.csv$",
+            re.IGNORECASE,
+        )
+
+        files = [
+            f
+            for f in all_files
+            if pattern.fullmatch(f.get("name", ""))
+        ]
 
         files.sort(
             key=lambda f: f.get("modifiedTime", ""),
