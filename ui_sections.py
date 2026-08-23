@@ -877,32 +877,69 @@ def plot_gauge(value, max_value, title, unit="", color="#C77A16"):
 
 
 def plot_line_chart(df, x_col, y_cols, x_range=None, y_range=None, y_title=""):
-    """Multi-line Plotly chart (replaces st.line_chart for the Live
-    Monitoring charts) so the axes can be forced to explicit
-    min/max values instead of only auto-scaling. x_range/y_range are
-    optional (min, max) tuples — pass None to leave that axis on
-    autoscale."""
+    """Multi-line Plotly chart for Live Monitoring."""
+
     import plotly.graph_objects as go
 
     fig = go.Figure()
+
     for col in y_cols:
-        fig.add_trace(go.Scatter(x=df[x_col], y=df[col], mode="lines", name=str(col)))
+        # Make sure the Y values are numeric
+        y_data = pd.to_numeric(df[col], errors="coerce")
+
+        fig.add_trace(
+            go.Scatter(
+                x=df[x_col],
+                y=y_data,
+                mode="lines",
+                name=str(col),
+
+                # Explicitly make the line visible
+                line=dict(
+                    width=2,
+                ),
+
+                # Do not show individual markers
+                connectgaps=False,
+
+                hovertemplate=(
+                    f"<b>{col}</b><br>"
+                    "%{x|%b %d, %Y, %H:%M:%S}<br>"
+                    "%{y}<extra></extra>"
+                ),
+            )
+        )
 
     fig.update_layout(
         height=380,
         margin=dict(l=20, r=20, t=20, b=20),
+
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
-        font={"family": "Inter, sans-serif", "color": "#1F2937"},
-        legend={"orientation": "h", "y": -0.2},
+
+        font={
+            "family": "Inter, sans-serif",
+            "color": "#1F2937",
+        },
+
+        legend={
+            "orientation": "h",
+            "y": -0.2,
+        },
+
         yaxis_title=y_title,
+
+        # Make sure Plotly does not hide the traces
+        showlegend=True,
     )
+
     if x_range is not None:
         fig.update_xaxes(range=list(x_range))
+
     if y_range is not None:
         fig.update_yaxes(range=list(y_range))
-    return fig
 
+    return fig
 
 # =========================
 # PLOTTING HELPERS
