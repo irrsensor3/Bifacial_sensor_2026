@@ -108,18 +108,22 @@ def list_available_csvs():
  
  
 def download_csv_as_df(file_id: str) -> pd.DataFrame:
-    """Downloads a single CSV from Drive by file ID and returns it as
-    a DataFrame. Raises on failure — the caller should wrap this in
-    a try/except and show an error, since a report can't be built
-    without the actual data."""
+    """Download one CSV from Google Drive."""
+
     service = _get_drive_service()
+
     request = service.files().get_media(fileId=file_id)
+
     buffer = io.BytesIO()
     downloader = MediaIoBaseDownload(buffer, request)
+
     done = False
+
     while not done:
         _, done = downloader.next_chunk()
+
     buffer.seek(0)
+
     return pd.read_csv(buffer)
  
  
@@ -199,34 +203,56 @@ def resolve_period_files(available_files, start_date, end_date):
     return out
  
  
-@st.cache_data(ttl=None, persist="disk")
+@st.cache_data(ttl=None, persist="disk", max_entries=100)
+def _download_single_csv_cached(file_id: str, modified_time: str) -> pd.DataFrame:
+    """
+    Cache each individual CSV separately.
+
+    The modified_time is part of the cache key.
+    If the CSV changes, Streamlit downloads the new version.
+
+    max_entries prevents the cache from growing without limit.
+    """
+
+    return download_csv_as_df(file_id)
+ 
 def download_and_combine_csvs(file_entries: tuple) -> pd.DataFrame:
-    """Downloads several CSVs and concatenates them into one DataFrame.
- 
-    `file_entries` is a tuple of (file_id, modified_time) pairs rather than
-    bare ids. Including modified_time in the cache key means: a finished
-    past month's file never changes, so it's cached on disk indefinitely
-    (survives app restarts — that's what makes historical data feel
-    "always there" instead of a slow re-download every session). The
-    *current* month's file, on the other hand, keeps growing all day as the
-    Pi appends new rows before each rclone sync — its modified_time changes
-    each sync, which naturally busts this cache entry and pulls the latest
-    version instead of serving stale same-day data all day.
- 
-    Skips any individual file that fails to download rather than failing
-    the whole batch, since one corrupt/partial sync shouldn't block the
-    rest of the period."""
+    """
+    Download and combine the requested CSV files.
+
+    Each individual CSV is cached separately, so changing one current
+    CSV does not invalidate the cache for every historical CSV.
+    """
+
     dfs = []
-    for file_id, _modified_time in file_entries:
+
+    for file_id, modified_time in file_entries:
+
         try:
-            dfs.append(download_csv_as_df(file_id))
-        except Exception:
-            continue
+            df = _download_single_csv_cached(
+                file_id,
+                modified_time or "",
+            )
+
+            if df is not None and not df.empty:
+                dfs.append(df)
+
+        except Exception as exc:
+            # Don't let one bad/partially synced CSV crash the entire app.
+            st.warning(
+                f"Could not load one historical CSV: {exc}"
+            )
+
     if not dfs:
         return pd.DataFrame()
-    return pd.concat(dfs, ignore_index=True)
- 
- 
+
+    combined = pd.concat(
+        dfs,
+        ignore_index=True,
+        copy=False,
+    )
+
+    return combined
 # =========================
 # DC METER (panel-meter-data) — separate Drive folder, separate CSV
 # schema (long format: one row per device per timestamp), so it gets
