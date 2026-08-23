@@ -341,37 +341,24 @@ def download_dcm_csv_as_df(file_id: str) -> pd.DataFrame:
     persist="disk",
     max_entries=60,
 )
-def _download_single_csv_cached(
+def _download_single_dcm_csv_cached(
     file_id: str,
     modified_time: str,
 ) -> pd.DataFrame:
     """
-    Cache individual CSV files.
-
-    Historical files normally never change, so they remain cached.
-
-    The modified_time is part of the cache key. Therefore, if a file
-    changes, Streamlit automatically downloads the newer version.
+    Cache individual DC meter CSV files.
     """
+    return download_dcm_csv_as_df(file_id)
 
-    return download_csv_as_df(file_id)
 
-
-def download_and_combine_csvs(file_entries: tuple) -> pd.DataFrame:
+def download_and_combine_dcm_csvs(file_entries: tuple) -> pd.DataFrame:
     """
-    Download and combine requested irradiance CSVs.
-
+    Download and combine requested DC meter CSVs.
     Each CSV is cached independently.
-
-    This is important because if today's CSV changes, only that CSV
-    needs to be downloaded again. Previously downloaded historical
-    CSVs remain cached.
     """
-
     if not file_entries:
         return pd.DataFrame()
 
-    # Safety protection.
     MAX_FILES = 31
 
     if len(file_entries) > MAX_FILES:
@@ -383,17 +370,13 @@ def download_and_combine_csvs(file_entries: tuple) -> pd.DataFrame:
     dfs = []
 
     for file_id, modified_time in file_entries:
-
         try:
-
-            df = _download_single_csv_cached(
+            df = _download_single_dcm_csv_cached(
                 file_id,
                 modified_time or "",
             )
-
             if df is not None and not df.empty:
                 dfs.append(df)
-
         except Exception:
             # One failed file should not kill the application.
             continue
@@ -406,5 +389,4 @@ def download_and_combine_csvs(file_entries: tuple) -> pd.DataFrame:
         ignore_index=True,
         copy=False,
     )
-
     return combined
