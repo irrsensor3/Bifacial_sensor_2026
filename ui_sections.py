@@ -876,43 +876,87 @@ def plot_gauge(value, max_value, title, unit="", color="#C77A16"):
 
 
 
-def plot_line_chart(df, x_col, y_cols, x_range=None, y_range=None, y_title=""):
-    """Multi-line Plotly chart for Live Monitoring."""
-
+def plot_line_chart(
+    df,
+    x_col,
+    y_cols,
+    x_range=None,
+    y_range=None,
+    y_title=""
+):
     import plotly.graph_objects as go
+    import pandas as pd
 
     fig = go.Figure()
 
+    # Make a copy so we don't modify the original dataframe
+    plot_df = df.copy()
+
+    # Make sure timestamp is actually datetime
+    plot_df[x_col] = pd.to_datetime(
+        plot_df[x_col],
+        errors="coerce"
+    )
+
+    # Sort chronologically
+    plot_df = plot_df.sort_values(x_col)
+
     for col in y_cols:
-        # Make sure the Y values are numeric
-        y_data = pd.to_numeric(df[col], errors="coerce")
+
+        if col not in plot_df.columns:
+            continue
+
+        # Convert values to numeric
+        y_data = pd.to_numeric(
+            plot_df[col],
+            errors="coerce"
+        )
+
+        # IMPORTANT:
+        # Only remove rows where BOTH x and y are invalid.
+        trace_df = pd.DataFrame({
+            "x": plot_df[x_col],
+            "y": y_data,
+        }).dropna(subset=["x", "y"])
+
+        # Debugging information
+        print(
+            f"Plotting {col}: "
+            f"{len(trace_df)} valid points"
+        )
 
         fig.add_trace(
             go.Scatter(
-                x=df[x_col],
-                y=y_data,
+                x=trace_df["x"],
+                y=trace_df["y"],
+
                 mode="lines",
+
                 name=str(col),
 
-                # Explicitly make the line visible
                 line=dict(
                     width=2,
                 ),
 
-                # Do not show individual markers
                 connectgaps=False,
 
                 hovertemplate=(
                     f"<b>{col}</b><br>"
                     "%{x|%b %d, %Y, %H:%M:%S}<br>"
-                    "%{y}<extra></extra>"
+                    "%{y:.3f}<extra></extra>"
                 ),
             )
         )
 
     fig.update_layout(
         height=380,
-        margin=dict(l=20, r=20, t=20, b=20),
+
+        margin=dict(
+            l=20,
+            r=20,
+            t=20,
+            b=20,
+        ),
 
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
@@ -929,18 +973,22 @@ def plot_line_chart(df, x_col, y_cols, x_range=None, y_range=None, y_title=""):
 
         yaxis_title=y_title,
 
-        # Make sure Plotly does not hide the traces
         showlegend=True,
+
+        hovermode="x unified",
     )
 
     if x_range is not None:
-        fig.update_xaxes(range=list(x_range))
+        fig.update_xaxes(
+            range=list(x_range)
+        )
 
     if y_range is not None:
-        fig.update_yaxes(range=list(y_range))
+        fig.update_yaxes(
+            range=list(y_range)
+        )
 
     return fig
-
 # =========================
 # PLOTTING HELPERS
 # =========================
