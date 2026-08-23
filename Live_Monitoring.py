@@ -79,7 +79,7 @@ def _load_range(period_files, download_fn, build_created_at, start_date, end_dat
 
 # Google Drive historical data is intentionally much slower than the live
 # Supabase refresh.  Live data can refresh every 15 seconds, while Drive is
-# checked only once every 5 minutes.  This prevents repeated Drive downloads
+# checked only once every 30 minutes.  This prevents repeated Drive downloads
 # from blocking/crashing the Streamlit app.
 DRIVE_SYNC_INTERVAL_SECONDS = 1800
 
@@ -412,7 +412,7 @@ if len(period_files) > MAX_HISTORICAL_FILES:
 
     label = st.session_state.get(f"_{key_prefix}_label")
     if label:
-        st.caption(f"Currently appended: {label} • Drive sync every 5 min")
+        st.caption(f"Currently appended: {label} • Drive sync every 30 min")
 
     return st.session_state.get(f"_{key_prefix}_df"), label
 
