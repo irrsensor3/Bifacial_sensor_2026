@@ -408,17 +408,15 @@ def download_and_combine_csvs(file_entries: tuple) -> pd.DataFrame:
 @st.cache_data(ttl=1800)
 def list_available_dcm_csvs():
     """
-    Returns only the actual daily DCM CSV files.
+    Returns the actual daily DCM CSV files under panel-meter-data.
 
-    Accepted:
+    Accepts:
         YYYY-MM-DD_dcm_3366_bifaical.csv
 
-    Ignored:
+    Rejects:
         YYYY-MM-DD_dcm_3366_bifaical_avg.csv
-        and any other CSV files under panel-meter-data.
 
-    The folder structure is still discovered recursively, but only
-    filenames matching the exact DCM daily-file pattern are returned.
+    Also ignores unrelated CSV files.
     """
     try:
         service = _get_drive_service()
@@ -436,23 +434,29 @@ def list_available_dcm_csvs():
             folder_id
         )
 
-        # Exact filename pattern for the real DCM daily files.
-        #
-        # Example:
-        # 2026-08-23_dcm_3366_bifaical.csv
-        #
-        # This deliberately does NOT match:
-        # 2026-08-23_dcm_3366_bifaical_avg.csv
-        pattern = re.compile(
-            r"^\d{4}-\d{2}-\d{2}_dcm_3366_bifaical\.csv$",
-            re.IGNORECASE,
-        )
+        files = []
 
-        files = [
-            f
-            for f in all_files
-            if pattern.fullmatch(f.get("name", ""))
-        ]
+        for f in all_files:
+            name = f.get("name", "").lower()
+
+            # Must be a CSV
+            if not name.endswith(".csv"):
+                continue
+
+            # Must be a DCM 3366 file
+            if "_dcm_3366_" not in name:
+                continue
+
+            # IMPORTANT:
+            # Ignore average files
+            if "_avg.csv" in name:
+                continue
+
+            # Must begin with YYYY-MM-DD
+            if not re.match(r"^\d{4}-\d{2}-\d{2}_", name):
+                continue
+
+            files.append(f)
 
         files.sort(
             key=lambda f: f.get("modifiedTime", ""),
