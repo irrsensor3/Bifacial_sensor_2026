@@ -209,22 +209,21 @@ def resolve_period_files(available_files, start_date, end_date):
 # ============================================================
 
 @st.cache_data(
-    ttl=3600,
+    ttl=None,
     persist="disk",
-    max_entries=30,
+    max_entries=60,
 )
 def _download_single_csv_cached(
     file_id: str,
     modified_time: str,
 ) -> pd.DataFrame:
     """
-    Download ONE CSV and cache it.
+    Cache individual CSV files.
 
-    Important:
-    - Cache expires after 1 hour.
-    - Maximum 30 CSV DataFrames are kept.
-    - modified_time invalidates the cache when Drive reports
-      that the file changed.
+    Historical files normally never change, so they remain cached.
+
+    The modified_time is part of the cache key. Therefore, if a file
+    changes, Streamlit automatically downloads the newer version.
     """
 
     return download_csv_as_df(file_id)
@@ -232,66 +231,53 @@ def _download_single_csv_cached(
 
 def download_and_combine_csvs(file_entries: tuple) -> pd.DataFrame:
     """
-    Safely download multiple irradiance CSVs.
+    Download and combine requested irradiance CSVs.
 
-    Files are downloaded one at a time rather than creating
-    unnecessary copies of the complete dataset.
+    Each CSV is cached independently.
 
-    A hard safety limit prevents accidental loading of a huge
-    historical range.
+    This is important because if today's CSV changes, only that CSV
+    needs to be downloaded again. Previously downloaded historical
+    CSVs remain cached.
     """
-
-    MAX_FILES = 31
 
     if not file_entries:
         return pd.DataFrame()
 
+    # Safety protection.
+    MAX_FILES = 31
+
     if len(file_entries) > MAX_FILES:
         raise RuntimeError(
-            f"Refusing to load {len(file_entries)} CSV files at once. "
+            f"Too many CSV files requested ({len(file_entries)}). "
             f"Maximum allowed is {MAX_FILES}."
         )
 
     dfs = []
 
-    for index, (file_id, modified_time) in enumerate(file_entries):
+    for file_id, modified_time in file_entries:
 
         try:
 
             df = _download_single_csv_cached(
-                file_id=file_id,
-                modified_time=modified_time or "",
+                file_id,
+                modified_time or "",
             )
 
             if df is not None and not df.empty:
                 dfs.append(df)
 
-        except Exception as exc:
-
-            # Don't crash the whole application because
-            # one Drive file is unavailable.
+        except Exception:
+            # One failed file should not kill the application.
             continue
-
-        # Small pause between Drive requests.
-        # This is deliberately conservative for Streamlit Cloud.
-        if index < len(file_entries) - 1:
-            time.sleep(0.25)
 
     if not dfs:
         return pd.DataFrame()
 
-    try:
-
-        combined = pd.concat(
-            dfs,
-            ignore_index=True,
-            copy=False,
-        )
-
-    finally:
-
-        # Release references to individual DataFrames.
-        dfs.clear()
+    combined = pd.concat(
+        dfs,
+        ignore_index=True,
+        copy=False,
+    )
 
     return combined
 
@@ -351,75 +337,74 @@ def download_dcm_csv_as_df(file_id: str) -> pd.DataFrame:
  
  
 @st.cache_data(
-    ttl=3600,
+    ttl=None,
     persist="disk",
-    max_entries=30,
+    max_entries=60,
 )
-def _download_single_dcm_csv_cached(
+def _download_single_csv_cached(
     file_id: str,
     modified_time: str,
 ) -> pd.DataFrame:
     """
-    Download and cache one DC meter CSV.
+    Cache individual CSV files.
+
+    Historical files normally never change, so they remain cached.
+
+    The modified_time is part of the cache key. Therefore, if a file
+    changes, Streamlit automatically downloads the newer version.
     """
 
-    return download_dcm_csv_as_df(file_id)
+    return download_csv_as_df(file_id)
 
 
-def download_and_combine_dcm_csvs(
-    file_entries: tuple,
-) -> pd.DataFrame:
+def download_and_combine_csvs(file_entries: tuple) -> pd.DataFrame:
     """
-    Safely download multiple DC meter CSVs.
+    Download and combine requested irradiance CSVs.
 
-    Maximum 31 files per request.
+    Each CSV is cached independently.
+
+    This is important because if today's CSV changes, only that CSV
+    needs to be downloaded again. Previously downloaded historical
+    CSVs remain cached.
     """
-
-    MAX_FILES = 31
 
     if not file_entries:
         return pd.DataFrame()
 
+    # Safety protection.
+    MAX_FILES = 31
+
     if len(file_entries) > MAX_FILES:
         raise RuntimeError(
-            f"Refusing to load {len(file_entries)} DC meter CSV files "
-            f"at once. Maximum allowed is {MAX_FILES}."
+            f"Too many CSV files requested ({len(file_entries)}). "
+            f"Maximum allowed is {MAX_FILES}."
         )
 
     dfs = []
 
-    for index, (file_id, modified_time) in enumerate(file_entries):
+    for file_id, modified_time in file_entries:
 
         try:
 
-            df = _download_single_dcm_csv_cached(
-                file_id=file_id,
-                modified_time=modified_time or "",
+            df = _download_single_csv_cached(
+                file_id,
+                modified_time or "",
             )
 
             if df is not None and not df.empty:
                 dfs.append(df)
 
         except Exception:
-
+            # One failed file should not kill the application.
             continue
-
-        if index < len(file_entries) - 1:
-            time.sleep(0.25)
 
     if not dfs:
         return pd.DataFrame()
 
-    try:
-
-        combined = pd.concat(
-            dfs,
-            ignore_index=True,
-            copy=False,
-        )
-
-    finally:
-
-        dfs.clear()
+    combined = pd.concat(
+        dfs,
+        ignore_index=True,
+        copy=False,
+    )
 
     return combined
