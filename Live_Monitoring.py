@@ -271,8 +271,10 @@ def _historical_append_controls(key_prefix, available_files, download_fn, build_
                 st.session_state[f"_{key_prefix}_last_sync_monotonic"] = time.monotonic()
 
     mode = st.radio(
-        "Range", ["Month", "Year", "Date range", "≥ From date", "≤ Until date"],
-        horizontal=True, key=f"{key_prefix}_mode",
+        "Range",
+        ["Month", "Year", "Date range", "From date", "Until date"],
+        horizontal=True,
+        key=f"{key_prefix}_mode",
     )
 
     start_date = end_date = None
@@ -587,13 +589,30 @@ def render_live_monitoring():
             if has_error:
                 st.caption(f"{device_label} reported: {row.get('error')}")
 
+        
         with st.expander("🗄️ Append historical DC meter data from Drive"):
-            available_dcm_files = list_available_dcm_csvs()
+
+            dcm_data_type = st.radio(
+                "Historical data",
+                ["Normal", "Daily average"],
+                horizontal=True,
+                key="dcm_historical_data_type",
+            )
+        
+            use_avg = dcm_data_type == "Daily average"
+        
+            available_dcm_files = list_available_dcm_csvs(
+                include_avg=use_avg
+            )
+        
             if not available_dcm_files and st.session_state.get("_dcm_drive_list_error"):
                 with st.expander("Error details"):
                     st.code(st.session_state["_dcm_drive_list_error"])
+        
             df_dcm_hist, _ = _historical_append_controls(
-                "live_append_dcm", available_dcm_files, download_and_combine_dcm_csvs,
+                "live_append_dcm_avg" if use_avg else "live_append_dcm",
+                available_dcm_files,
+                download_and_combine_dcm_csvs,
             )
 
         df_panel_combined = df_panel
