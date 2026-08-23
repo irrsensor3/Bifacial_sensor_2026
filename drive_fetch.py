@@ -541,18 +541,18 @@ def _download_single_dcm_csv_cached(
 def download_and_combine_dcm_csvs(file_entries: tuple) -> pd.DataFrame:
     """
     Download and combine requested DC meter CSVs.
+
     Each CSV is cached independently.
+
+    There is intentionally NO fixed maximum number of files here.
+    This allows loading an entire month, year, or larger historical
+    period when required.
+
+    Only the files passed in file_entries are downloaded.
     """
+
     if not file_entries:
         return pd.DataFrame()
-
-    MAX_FILES = 31
-
-    if len(file_entries) > MAX_FILES:
-        raise RuntimeError(
-            f"Too many CSV files requested ({len(file_entries)}). "
-            f"Maximum allowed is {MAX_FILES}."
-        )
 
     dfs = []
 
@@ -562,8 +562,10 @@ def download_and_combine_dcm_csvs(file_entries: tuple) -> pd.DataFrame:
                 file_id,
                 modified_time or "",
             )
+
             if df is not None and not df.empty:
                 dfs.append(df)
+
         except Exception:
             # One failed file should not kill the application.
             continue
@@ -576,4 +578,5 @@ def download_and_combine_dcm_csvs(file_entries: tuple) -> pd.DataFrame:
         ignore_index=True,
         copy=False,
     )
+
     return combined
