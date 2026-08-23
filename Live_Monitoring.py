@@ -594,7 +594,7 @@ def render_live_monitoring():
 
             dcm_data_type = st.radio(
                 "Historical data",
-                ["Normal", "Daily average"],
+                ["Normal", "Average"],
                 horizontal=True,
                 key="dcm_historical_data_type",
             )
