@@ -678,9 +678,11 @@ def render_live_monitoring():
             }[metric_choice]
 
             dcm_fig = plot_line_chart(
-                pivot_reset, "created_at", meter_cols,
-                x_range=(dcm_x_start, dcm_x_end),
-                y_range=None if dcm_chart_auto else (dcm_chart_ymin, dcm_chart_ymax),
+                pivot_reset,
+                "created_at",
+                meter_cols,
+                x_range=None,
+                y_range=None,
                 y_title=metric_axis_label,
             )
             st.plotly_chart(dcm_fig, use_container_width=True)
