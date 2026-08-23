@@ -360,14 +360,6 @@ def download_and_combine_csvs(file_entries: tuple) -> pd.DataFrame:
     if not file_entries:
         return pd.DataFrame()
 
-    # Safety protection.
-    MAX_FILES = 31
-
-    if len(file_entries) > MAX_FILES:
-        raise RuntimeError(
-            f"Too many CSV files requested ({len(file_entries)}). "
-            f"Maximum allowed is {MAX_FILES}."
-        )
 
     dfs = []
 
