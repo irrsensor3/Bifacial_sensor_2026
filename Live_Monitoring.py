@@ -328,12 +328,45 @@ def _historical_append_controls(key_prefix, available_files, download_fn, build_
         if earliest <= today <= latest:
             today_files = resolve_period_files(available_files, today, today)
             if today_files:
-                df_today = _load_range(today_files, download_fn, build_created_at, today, today)
-                st.session_state[f"_{key_prefix}_df"] = df_today
-                st.session_state[f"_{key_prefix}_label"] = f"{today:%d %b %Y}"
-                st.session_state[f"_{key_prefix}_start_date"] = today
-                st.session_state[f"_{key_prefix}_end_date"] = today
-                st.session_state[f"_{key_prefix}_last_sync_monotonic"] = time.monotonic()
+
+                df_today = _load_range(
+                    today_files,
+                    download_fn,
+                    build_created_at,
+                    today,
+                    today,
+                )
+
+                st.session_state[
+                    f"_{key_prefix}_df"
+                ] = df_today
+
+                st.session_state[
+                    f"_{key_prefix}_label"
+                ] = f"{today:%d %b %Y}"
+
+                st.session_state[
+                    f"_{key_prefix}_start_date"
+                ] = today
+
+                st.session_state[
+                    f"_{key_prefix}_end_date"
+                ] = today
+
+    # Remember exactly which Drive version we loaded.
+                st.session_state[
+                    f"_{key_prefix}_today_signature"
+                ] = tuple(
+                    (
+                        f["id"],
+                        f.get("modifiedTime", ""),
+                    )
+                    for f in today_files
+                )
+
+                st.session_state[
+                    f"_{key_prefix}_last_sync_monotonic"
+                ] = time.monotonic()
 
     mode = st.radio(
         "Range", ["Month", "Year", "Date range", "From date", "Until date"],
