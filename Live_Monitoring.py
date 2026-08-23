@@ -325,18 +325,16 @@ def _historical_append_controls(key_prefix, available_files, download_fn, build_
         f"{start_date:%d %b %Y} – {end_date:%d %b %Y}"
     )
 
-    # Safety limit for Streamlit Cloud.
-    # Loading hundreds of CSVs into one DataFrame can consume a large
-    # amount of RAM and cause the Cloud process to terminate.
-    MAX_HISTORICAL_FILES = 31
+    period_files = resolve_period_files(
+        available_files,
+        start_date,
+        end_date,
+    )
 
-    if len(period_files) > MAX_HISTORICAL_FILES:
-        st.warning(
-            f"This range contains {len(period_files)} CSV files. "
-            f"For stability, please select a smaller range "
-            f"(maximum {MAX_HISTORICAL_FILES} files at once)."
-        )
-        period_files = []
+    st.caption(
+        f"{len(period_files)} file(s) found covering "
+        f"{start_date:%d %b %Y} – {end_date:%d %b %Y}"
+    )
 
     btn_col, remove_col = st.columns(2)
 
