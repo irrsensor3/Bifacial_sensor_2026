@@ -328,7 +328,7 @@ def resolve_period_files(available_files, start_date, end_date):
 @st.cache_data(
     ttl=None,
     persist="disk",
-    max_entries=60,
+    max_entries=600,
 )
 def _download_single_csv_cached(
     file_id: str,
