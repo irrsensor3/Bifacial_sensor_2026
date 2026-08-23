@@ -90,41 +90,81 @@ def _sync_drive_history_if_due(
     download_fn,
     build_created_at=None,
 ):
-    """Refresh the currently selected historical Drive range at most once
-    every DRIVE_SYNC_INTERVAL_SECONDS.
+    """Automatically refresh ONLY today's Drive data.
 
-    The range is stored in session_state.  This means the automatic sync is
-    not limited to today: if the user loaded a month/year/custom range, that
-    same range is refreshed when its Drive files change.
-
-    download_and_combine_* uses (file_id, modifiedTime) as its cache key, so
-    unchanged historical files remain disk-cached while a changed CSV is
-    downloaded again.
+    Older historical ranges remain static after being loaded.
+    This prevents Streamlit Cloud from repeatedly rebuilding large
+    historical DataFrames.
     """
+
     if not available_files:
         return st.session_state.get(f"_{key_prefix}_df")
 
-    start_date = st.session_state.get(f"_{key_prefix}_start_date")
-    end_date = st.session_state.get(f"_{key_prefix}_end_date")
+    start_date = st.session_state.get(
+        f"_{key_prefix}_start_date"
+    )
+
+    end_date = st.session_state.get(
+        f"_{key_prefix}_end_date"
+    )
+
     if start_date is None or end_date is None:
         return st.session_state.get(f"_{key_prefix}_df")
 
-    now = time.monotonic()
-    last_sync = st.session_state.get(f"_{key_prefix}_last_sync_monotonic", 0.0)
+    # ---------------------------------------------------------
+    # IMPORTANT:
+    # Automatically sync ONLY today's data.
+    # ---------------------------------------------------------
 
-    if now - last_sync < DRIVE_SYNC_INTERVAL_SECONDS:
+    today = date.today()
+
+    if start_date != today or end_date != today:
         return st.session_state.get(f"_{key_prefix}_df")
 
-    # Mark the sync attempt before downloading so a slow/failed Drive request
-    # cannot be retriggered on every 15-second fragment tick.
-    st.session_state[f"_{key_prefix}_last_sync_monotonic"] = now
+    now = time.monotonic()
+
+    last_sync = st.session_state.get(
+        f"_{key_prefix}_last_sync_monotonic",
+        0.0,
+    )
+
+    if now - last_sync < DRIVE_SYNC_INTERVAL_SECONDS:
+        return st.session_state.get(
+            f"_{key_prefix}_df"
+        )
+
+    # Mark before downloading so repeated fragment refreshes
+    # cannot start multiple Drive downloads.
+    st.session_state[
+        f"_{key_prefix}_last_sync_monotonic"
+    ] = now
 
     try:
+
         period_files = resolve_period_files(
-            available_files, start_date, end_date
+            available_files,
+            start_date,
+            end_date,
         )
+
         if not period_files:
-            return st.session_state.get(f"_{key_prefix}_df")
+            return st.session_state.get(
+                f"_{key_prefix}_df"
+            )
+
+        # Safety limit even for automatic syncing.
+        if len(period_files) > 31:
+            st.session_state[
+                f"_{key_prefix}_sync_error"
+            ] = (
+                f"Today's Drive range contains "
+                f"{len(period_files)} files; "
+                f"automatic sync skipped for safety."
+            )
+
+            return st.session_state.get(
+                f"_{key_prefix}_df"
+            )
 
         df_hist = _load_range(
             period_files,
@@ -134,19 +174,25 @@ def _sync_drive_history_if_due(
             end_date,
         )
 
-        # Keep the previous good dataset if Drive temporarily fails/returns
-        # nothing.  A transient Drive problem should not blank the graph.
         if df_hist is not None and not df_hist.empty:
-            st.session_state[f"_{key_prefix}_df"] = df_hist
-            st.session_state[f"_{key_prefix}_label"] = (
-                f"{start_date:%d %b %Y} – {end_date:%d %b %Y}"
-                if start_date != end_date
-                else f"{start_date:%d %b %Y}"
-            )
-    except Exception as exc:
-        st.session_state[f"_{key_prefix}_sync_error"] = str(exc)
 
-    return st.session_state.get(f"_{key_prefix}_df")
+            st.session_state[
+                f"_{key_prefix}_df"
+            ] = df_hist
+
+            st.session_state[
+                f"_{key_prefix}_label"
+            ] = f"{today:%d %b %Y}"
+
+    except Exception as exc:
+
+        st.session_state[
+            f"_{key_prefix}_sync_error"
+        ] = str(exc)
+
+    return st.session_state.get(
+        f"_{key_prefix}_df"
+    )
 
 
 def _time_range_controls(key_prefix, data_min_t, data_max_t):
@@ -289,15 +335,40 @@ def _historical_append_controls(key_prefix, available_files, download_fn, build_
         st.caption("Pick a valid range.")
         return st.session_state.get(f"_{key_prefix}_df"), st.session_state.get(f"_{key_prefix}_label")
 
-    period_files = resolve_period_files(available_files, start_date, end_date)
-    st.caption(f"{len(period_files)} file(s) found covering {start_date:%d %b %Y} – {end_date:%d %b %Y}")
+   period_files = resolve_period_files(
+    available_files,
+    start_date,
+    end_date,
+)
+
+st.caption(
+    f"{len(period_files)} file(s) found covering "
+    f"{start_date:%d %b %Y} – {end_date:%d %b %Y}"
+)
+
+# Safety limit for Streamlit Cloud.
+# Loading hundreds of CSVs into one DataFrame can consume a large
+# amount of RAM and cause the Cloud process to terminate.
+MAX_HISTORICAL_FILES = 31
+
+if len(period_files) > MAX_HISTORICAL_FILES:
+    st.warning(
+        f"This range contains {len(period_files)} CSV files. "
+        f"For stability, please select a smaller range "
+        f"(maximum {MAX_HISTORICAL_FILES} files at once)."
+    )
+    period_files = []
+  
 
     btn_col, remove_col = st.columns(2)
+    
     with btn_col:
         go = st.button(
-            "📥 Load this range", key=f"{key_prefix}_append_btn",
-            disabled=not period_files, use_container_width=True,
-        )
+            "📥 Load this range",
+            key=f"{key_prefix}_append_btn",
+            disabled=not period_files,
+            use_container_width=True,
+        )    
     if go:
         with st.spinner(f"Loading {len(period_files)} file(s)..."):
             df_hist = _load_range(period_files, download_fn, build_created_at, start_date, end_date)
