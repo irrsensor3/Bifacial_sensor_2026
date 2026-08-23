@@ -1,24 +1,26 @@
+
+Drive fetch · PY
 import io
 from datetime import datetime
-
+ 
 import pandas as pd
 import streamlit as st
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload
-
+ 
 # The Drive folder rclone syncs your CSVs into (see: rclone sync
 # "/home/skyimager5/Desktop/bifacial data" gdrive:bifacial-data)
 DRIVE_FOLDER_NAME = "bifacial-data"
-
+ 
 # Separate Drive folder for DC meter (voltage/current/power) CSVs —
 # organized as <root>/<device_id>/<year>/<month>/*.csv, one subfolder
 # per meter device (e.g. dcm_3366)
 DCM_DRIVE_FOLDER_NAME = "panel-meter-data"
-
+ 
 SCOPES = ["https://www.googleapis.com/auth/drive.readonly"]
-
-
+ 
+ 
 @st.cache_resource
 def _get_drive_service():
     """Builds a Drive API client from the service account credentials
@@ -30,8 +32,8 @@ def _get_drive_service():
         creds_dict, scopes=SCOPES
     )
     return build("drive", "v3", credentials=credentials)
-
-
+ 
+ 
 def _get_folder_id(service, folder_name=DRIVE_FOLDER_NAME):
     """Looks up the Drive folder ID by name. Assumes the folder name
     is unique enough (top-level, shared directly with the service
@@ -46,8 +48,8 @@ def _get_folder_id(service, folder_name=DRIVE_FOLDER_NAME):
     if not files:
         return None
     return files[0]["id"]
-
-
+ 
+ 
 def _find_all_csvs_recursive(service, root_folder_id):
     """Walks the folder tree starting at root_folder_id (breadth-first)
     and collects every CSV found at any depth — needed because the Pi
@@ -58,7 +60,7 @@ def _find_all_csvs_recursive(service, root_folder_id):
     without guessing from filenames or Drive's modifiedTime."""
     csv_files = []
     folders_to_search = [(root_folder_id, [])]
-
+ 
     while folders_to_search:
         current_id, path_parts = folders_to_search.pop()
         query = f"'{current_id}' in parents and trashed = false"
@@ -77,31 +79,35 @@ def _find_all_csvs_recursive(service, root_folder_id):
             elif entry["name"].lower().endswith(".csv"):
                 entry["folder_path"] = path_parts
                 csv_files.append(entry)
-
+ 
     return csv_files
-
-
-@st.cache_data(ttl=60)
+ 
+ 
+@st.cache_data(ttl=300)
 def list_available_csvs():
     """Returns a list of dicts (id, name, modifiedTime) for every CSV
     anywhere under the Drive folder (including year/month
     subfolders), newest first. Returns an empty list (rather than
     raising) on any failure, so the UI can show a friendly message
-    instead of crashing the whole app."""
+    instead of crashing the whole app.
+ 
+    Cached for 5 minutes — long enough to avoid hammering the Drive API
+    on every rerun, short enough that a brand new month's folder shows up
+    without needing an app restart."""
     try:
         service = _get_drive_service()
         folder_id = _get_folder_id(service)
         if folder_id is None:
             return []
-
+ 
         files = _find_all_csvs_recursive(service, folder_id)
         files.sort(key=lambda f: f.get("modifiedTime", ""), reverse=True)
         return files
     except Exception as e:
         st.session_state["_drive_list_error"] = str(e)
         return []
-
-
+ 
+ 
 def download_csv_as_df(file_id: str) -> pd.DataFrame:
     """Downloads a single CSV from Drive by file ID and returns it as
     a DataFrame. Raises on failure — the caller should wrap this in
@@ -116,8 +122,8 @@ def download_csv_as_df(file_id: str) -> pd.DataFrame:
         _, done = downloader.next_chunk()
     buffer.seek(0)
     return pd.read_csv(buffer)
-
-
+ 
+ 
 def format_file_label(file_entry: dict) -> str:
     """Human-friendly label for a dropdown option, e.g.
     'Bifacial_ 2026-07-29.csv — modified 2026-07-30 03:12'."""
@@ -129,8 +135,8 @@ def format_file_label(file_entry: dict) -> str:
     except Exception:
         modified_label = modified
     return f"{name} — modified {modified_label}" if modified_label else name
-
-
+ 
+ 
 def extract_year(file_entry: dict) -> str:
     """Best-effort year for a CSV. Prefers the <year> folder it was
     found under — searches every level of its folder path (not just
@@ -144,15 +150,15 @@ def extract_year(file_entry: dict) -> str:
             return part
     modified = file_entry.get("modifiedTime", "")
     return modified[:4] if modified else "unknown"
-
-
+ 
+ 
 MONTH_LABELS = {
     "01": "January", "02": "February", "03": "March", "04": "April",
     "05": "May", "06": "June", "07": "July", "08": "August",
     "09": "September", "10": "October", "11": "November", "12": "December",
 }
-
-
+ 
+ 
 def extract_month(file_entry: dict) -> str:
     """Best-effort zero-padded month ('01'-'12') for a CSV — the
     folder immediately after whichever <year> folder was found in its
@@ -166,24 +172,53 @@ def extract_month(file_entry: dict) -> str:
             break
     modified = file_entry.get("modifiedTime", "")
     return modified[5:7] if len(modified) >= 7 else "unknown"
-
-
+ 
+ 
 def month_label(month: str) -> str:
     """'07' -> '07 - July'; falls back to the raw value if unrecognized."""
     name = MONTH_LABELS.get(month)
     return f"{month} - {name}" if name else month
-
-
-@st.cache_data(ttl=3600)
-def download_and_combine_csvs(file_ids: tuple) -> pd.DataFrame:
-    """Downloads several CSVs by file ID and concatenates them into one
-    DataFrame — used to build a full year's worth of data for the
-    annual irradiance tracker. Cached for an hour since a year's data
-    doesn't change minute to minute. Skips any individual file that
-    fails to download rather than failing the whole batch, since one
-    corrupt/partial sync shouldn't block the rest of the year."""
+ 
+ 
+def resolve_period_files(available_files, start_date, end_date):
+    """Returns the subset of available_files whose (year, month) folder
+    overlaps [start_date, end_date] (both inclusive, as date objects).
+    Files with an unparseable year/month are skipped rather than raising —
+    a handful of stray files shouldn't block loading everything else."""
+    if not available_files:
+        return []
+    start_ym = (start_date.year, start_date.month)
+    end_ym = (end_date.year, end_date.month)
+    out = []
+    for f in available_files:
+        y, m = extract_year(f), extract_month(f)
+        if not (y.isdigit() and m.isdigit()):
+            continue
+        ym = (int(y), int(m))
+        if start_ym <= ym <= end_ym:
+            out.append(f)
+    return out
+ 
+ 
+@st.cache_data(ttl=None, persist="disk")
+def download_and_combine_csvs(file_entries: tuple) -> pd.DataFrame:
+    """Downloads several CSVs and concatenates them into one DataFrame.
+ 
+    `file_entries` is a tuple of (file_id, modified_time) pairs rather than
+    bare ids. Including modified_time in the cache key means: a finished
+    past month's file never changes, so it's cached on disk indefinitely
+    (survives app restarts — that's what makes historical data feel
+    "always there" instead of a slow re-download every session). The
+    *current* month's file, on the other hand, keeps growing all day as the
+    Pi appends new rows before each rclone sync — its modified_time changes
+    each sync, which naturally busts this cache entry and pulls the latest
+    version instead of serving stale same-day data all day.
+ 
+    Skips any individual file that fails to download rather than failing
+    the whole batch, since one corrupt/partial sync shouldn't block the
+    rest of the period."""
     dfs = []
-    for file_id in file_ids:
+    for file_id, _modified_time in file_entries:
         try:
             dfs.append(download_csv_as_df(file_id))
         except Exception:
@@ -191,16 +226,16 @@ def download_and_combine_csvs(file_ids: tuple) -> pd.DataFrame:
     if not dfs:
         return pd.DataFrame()
     return pd.concat(dfs, ignore_index=True)
-
-
+ 
+ 
 # =========================
 # DC METER (panel-meter-data) — separate Drive folder, separate CSV
 # schema (long format: one row per device per timestamp), so it gets
 # its own listing + download helpers rather than reusing the sensor
 # ones above.
 # =========================
-
-@st.cache_data(ttl=60)
+ 
+@st.cache_data(ttl=300)
 def list_available_dcm_csvs():
     """Same idea as list_available_csvs(), but for the DC meter CSVs
     under the separate 'panel-meter-data' Drive folder. Returns an
@@ -210,15 +245,15 @@ def list_available_dcm_csvs():
         folder_id = _get_folder_id(service, DCM_DRIVE_FOLDER_NAME)
         if folder_id is None:
             return []
-
+ 
         files = _find_all_csvs_recursive(service, folder_id)
         files.sort(key=lambda f: f.get("modifiedTime", ""), reverse=True)
         return files
     except Exception as e:
         st.session_state["_dcm_drive_list_error"] = str(e)
         return []
-
-
+ 
+ 
 def _standardize_dcm_columns(df: pd.DataFrame) -> pd.DataFrame:
     """Renames a raw DC-meter CSV's columns (Datetime, Device_ID,
     Forward_energy_kWh, Active_power_kW, Current_A, Voltage_V, Error)
@@ -240,22 +275,21 @@ def _standardize_dcm_columns(df: pd.DataFrame) -> pd.DataFrame:
     if "created_at" in df.columns:
         df["created_at"] = pd.to_datetime(df["created_at"], errors="coerce")
     return df
-
-
+ 
+ 
 def download_dcm_csv_as_df(file_id: str) -> pd.DataFrame:
     """Downloads a single DC-meter CSV and standardizes its columns.
     Raises on failure, same as download_csv_as_df."""
     return _standardize_dcm_columns(download_csv_as_df(file_id))
-
-
-@st.cache_data(ttl=3600)
-def download_and_combine_dcm_csvs(file_ids: tuple) -> pd.DataFrame:
-    """Downloads several DC-meter CSVs by file ID, concatenates them,
-    and standardizes columns — used to append a full year of DC meter
-    history onto the live chart. Skips any file that fails to
-    download rather than failing the whole batch."""
+ 
+ 
+@st.cache_data(ttl=None, persist="disk")
+def download_and_combine_dcm_csvs(file_entries: tuple) -> pd.DataFrame:
+    """Downloads several DC-meter CSVs, concatenates them, and standardizes
+    columns. Same (file_id, modified_time) cache-key trick as
+    download_and_combine_csvs — see its docstring."""
     dfs = []
-    for file_id in file_ids:
+    for file_id, _modified_time in file_entries:
         try:
             dfs.append(download_csv_as_df(file_id))
         except Exception:
@@ -263,3 +297,4 @@ def download_and_combine_dcm_csvs(file_ids: tuple) -> pd.DataFrame:
     if not dfs:
         return pd.DataFrame()
     return _standardize_dcm_columns(pd.concat(dfs, ignore_index=True))
+ 
