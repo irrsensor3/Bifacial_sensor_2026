@@ -615,7 +615,10 @@ def render_live_monitoring():
                 download_and_combine_dcm_csvs,
             )
 
-        df_panel_combined = df_panel
+        if df_dcm_hist is not None and not df_dcm_hist.empty:
+            df_panel_combined = df_dcm_hist.copy()
+        else:
+            df_panel_combined = df_panel.copy()
         if df_dcm_hist is not None and not df_dcm_hist.empty:
             needed_cols = [
                 "created_at", "device_id", "voltage_v", "current_a",
