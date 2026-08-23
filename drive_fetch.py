@@ -51,19 +51,52 @@ def _get_folder_id(service, folder_name=DRIVE_FOLDER_NAME):
  
  
 def _find_all_csvs_recursive(service, root_folder_id):
-    """Walks the folder tree starting at root_folder_id (breadth-first)
-    and collects every CSV found at any depth — needed because the Pi
-    logger organizes files into <root>/<year>/<month>/*.csv rather than
-    dropping them flat in the top-level folder. Each returned entry
-    gets a "folder_path" list (e.g. ["2026", "07"]) recording which
-    subfolders it was found under, so callers can group files by year
-    without guessing from filenames or Drive's modifiedTime."""
+    """
+    Walk through the Drive folder tree and collect ONLY CSV files that
+    belong to a valid year/month folder structure.
+
+    Accepted structures:
+
+        bifacial-data/
+            <year>/
+                <month>/
+                    file.csv
+
+        panel-meter-data/
+            <device_id>/
+                <year>/
+                    <month>/
+                        file.csv
+
+    CSV files outside a year/month structure are ignored.
+
+    Example:
+
+        bifacial-data/
+            2026/
+                08/
+                    Bifacial_2026-08-23.csv     <-- INCLUDED
+            alerts.csv                         <-- IGNORED
+
+        panel-meter-data/
+            dcm_3366/
+                2026/
+                    08/
+                        2026-08-23.csv         <-- INCLUDED
+            alerts.csv                         <-- IGNORED
+    """
+
     csv_files = []
+
+    # Each item is:
+    # (folder_id, path_parts)
     folders_to_search = [(root_folder_id, [])]
- 
+
     while folders_to_search:
         current_id, path_parts = folders_to_search.pop()
+
         query = f"'{current_id}' in parents and trashed = false"
+
         res = (
             service.files()
             .list(
@@ -73,40 +106,123 @@ def _find_all_csvs_recursive(service, root_folder_id):
             )
             .execute()
         )
+
         for entry in res.get("files", []):
+
+            # ---------------------------------------------------------
+            # Folder
+            # ---------------------------------------------------------
             if entry["mimeType"] == "application/vnd.google-apps.folder":
-                folders_to_search.append((entry["id"], path_parts + [entry["name"]]))
-            elif entry["name"].lower().endswith(".csv"):
-                entry["folder_path"] = path_parts
-                csv_files.append(entry)
- 
+
+                folders_to_search.append(
+                    (
+                        entry["id"],
+                        path_parts + [entry["name"]],
+                    )
+                )
+
+                continue
+
+            # ---------------------------------------------------------
+            # Ignore anything that isn't CSV
+            # ---------------------------------------------------------
+            if not entry["name"].lower().endswith(".csv"):
+                continue
+
+            # ---------------------------------------------------------
+            # Check whether this CSV is inside:
+            #
+            #     ... / YEAR / MONTH / file.csv
+            #
+            # We deliberately DO NOT accept:
+            #
+            #     ... / alerts.csv
+            #     ... / YEAR / alerts.csv
+            #
+            # because those are not inside a year/month folder.
+            # ---------------------------------------------------------
+            valid_year_month = False
+
+            for i in range(len(path_parts) - 1):
+
+                year_part = path_parts[i]
+                month_part = path_parts[i + 1]
+
+                # Year must be exactly 4 digits
+                if not (
+                    year_part.isdigit()
+                    and len(year_part) == 4
+                ):
+                    continue
+
+                # Month must be 01-12
+                if not month_part.isdigit():
+                    continue
+
+                month_number = int(month_part)
+
+                if 1 <= month_number <= 12:
+                    valid_year_month = True
+                    break
+
+            # ---------------------------------------------------------
+            # CSV is outside a valid year/month structure.
+            # Ignore it completely.
+            # ---------------------------------------------------------
+            if not valid_year_month:
+                continue
+
+            # ---------------------------------------------------------
+            # Store the file and its folder path.
+            # ---------------------------------------------------------
+            entry = dict(entry)
+            entry["folder_path"] = path_parts
+
+            csv_files.append(entry)
+
     return csv_files
  
  
 @st.cache_data(ttl=1800)
 def list_available_csvs():
-    """Returns a list of dicts (id, name, modifiedTime) for every CSV
-    anywhere under the Drive folder (including year/month
-    subfolders), newest first. Returns an empty list (rather than
-    raising) on any failure, so the UI can show a friendly message
-    instead of crashing the whole app.
- 
-    Cached for 5 minutes — long enough to avoid hammering the Drive API
-    on every rerun, short enough that a brand new month's folder shows up
-    without needing an app restart."""
+    """
+    Returns only irradiance CSV files located inside a valid
+    year/month folder structure under bifacial-data.
+
+    Example accepted:
+
+        bifacial-data/2026/08/Bifacial_2026-08-23.csv
+
+    Example ignored:
+
+        bifacial-data/alerts.csv
+        bifacial-data/something.csv
+        bifacial-data/2026/alerts.csv
+    """
+
     try:
         service = _get_drive_service()
-        folder_id = _get_folder_id(service)
+
+        folder_id = _get_folder_id(service, DRIVE_FOLDER_NAME)
+
         if folder_id is None:
             return []
- 
-        files = _find_all_csvs_recursive(service, folder_id)
-        files.sort(key=lambda f: f.get("modifiedTime", ""), reverse=True)
+
+        files = _find_all_csvs_recursive(
+            service,
+            folder_id,
+        )
+
+        files.sort(
+            key=lambda f: f.get("modifiedTime", ""),
+            reverse=True,
+        )
+
         return files
+
     except Exception as e:
         st.session_state["_drive_list_error"] = str(e)
         return []
- 
  
 def download_csv_as_df(file_id: str) -> pd.DataFrame:
     """Download one CSV from Google Drive."""
@@ -290,18 +406,47 @@ def download_and_combine_csvs(file_entries: tuple) -> pd.DataFrame:
  
 @st.cache_data(ttl=1800)
 def list_available_dcm_csvs():
-    """Same idea as list_available_csvs(), but for the DC meter CSVs
-    under the separate 'panel-meter-data' Drive folder. Returns an
-    empty list (rather than raising) on any failure."""
+    """
+    Returns only DC meter CSV files located inside a valid
+    year/month folder structure under panel-meter-data.
+
+    Example accepted:
+
+        panel-meter-data/
+            dcm_3366/
+                2026/
+                    08/
+                        2026-08-23.csv
+
+    Example ignored:
+
+        panel-meter-data/alerts.csv
+        panel-meter-data/something.csv
+    """
+
     try:
         service = _get_drive_service()
-        folder_id = _get_folder_id(service, DCM_DRIVE_FOLDER_NAME)
+
+        folder_id = _get_folder_id(
+            service,
+            DCM_DRIVE_FOLDER_NAME,
+        )
+
         if folder_id is None:
             return []
- 
-        files = _find_all_csvs_recursive(service, folder_id)
-        files.sort(key=lambda f: f.get("modifiedTime", ""), reverse=True)
+
+        files = _find_all_csvs_recursive(
+            service,
+            folder_id,
+        )
+
+        files.sort(
+            key=lambda f: f.get("modifiedTime", ""),
+            reverse=True,
+        )
+
         return files
+
     except Exception as e:
         st.session_state["_dcm_drive_list_error"] = str(e)
         return []
