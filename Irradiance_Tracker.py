@@ -63,7 +63,7 @@ def render_irradiance_tracker():
     st.caption(f"{len(period_files)} file(s) found for {month_label(selected_month)} {selected_year}")
 
     if st.button("Load month data", type="primary"):
-        file_ids = tuple(f["id"] for f in period_files)
+        file_ids = tuple((f["id"], f.get("modifiedTime")) for f in period_files)
         with st.spinner(f"Downloading {len(file_ids)} file(s) for {month_label(selected_month)} {selected_year}..."):
             df_month = download_and_combine_csvs(file_ids)
         st.session_state["_irr_tracker_df"] = df_month
