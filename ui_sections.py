@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 from docx import Document
 from io import BytesIO
-from datetime import datetime, timezone, timedelta
+from datetime import datetime
 import math
 import os
 import base64
@@ -193,19 +193,6 @@ def inject_theme():
         .stApp { background-color: var(--base); color: var(--ink); }
         body, p, div, span, label, button, input { font-family: var(--sans); }
 
-        /* Streamlit draws its icons as ligatures in a Material font. The blanket
-           font rule above overrode it, so the ligature never formed and the icon
-           name printed as text -- which is where "keyboard_double_arrow_left"
-           came from. Hand those elements their font back. */
-        [data-testid="stIconMaterial"], .material-icons, .material-symbols-rounded,
-        .material-symbols-outlined, span[class*="material-symbols"],
-        [data-testid="stIconMaterial"] * {
-            font-family: 'Material Symbols Rounded', 'Material Icons' !important;
-            font-feature-settings: 'liga' !important;
-            text-transform: none !important;
-            letter-spacing: normal !important;
-        }
-
         h1 {
             font-family: var(--sans) !important;
             font-weight: 800 !important;
@@ -374,19 +361,6 @@ def inject_theme():
         }
         .stButton > button p, .stButton > button div, .stButton > button span { color: inherit !important; }
 
-        /* Option text inside radios and checkboxes is also wrapped in <label>,
-           so the widget-label styling below was shrinking it, upper-casing it
-           and greying it out until the choices read as bare dots. */
-        div[role="radiogroup"] label, div[role="radiogroup"] label p,
-        [data-baseweb="radio"] label, [data-baseweb="checkbox"] label,
-        [data-testid="stCheckbox"] label, [data-testid="stRadio"] label p {
-            color: var(--ink) !important;
-            font-size: .9rem !important;
-            font-weight: 500 !important;
-            text-transform: none !important;
-            letter-spacing: normal !important;
-        }
-
         label, [data-testid="stWidgetLabel"], [data-testid="stWidgetLabel"] p {
             color: var(--ink-mid) !important; font-size: .78rem !important;
             font-weight: 600 !important; text-transform: uppercase;
@@ -519,16 +493,6 @@ def inject_theme():
 SITE_LAT, SITE_LON, SITE_TZ = 3.02, 101.62, 8.0
 
 
-def site_now():
-    """Current time at the array, not on whatever machine is serving the page.
-
-    datetime.now() returns the server clock. Locally that happened to be
-    Malaysian time; deployed it is UTC, so the solar bar read "daylight" at
-    ten at night. Anchor to UTC and apply the site offset explicitly.
-    """
-    return datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(hours=SITE_TZ)
-
-
 def _sun_times(when=None, lat=SITE_LAT, lon=SITE_LON, tz=SITE_TZ):
     """Sunrise, solar noon and sunset for the site, in local hours.
 
@@ -536,7 +500,7 @@ def _sun_times(when=None, lat=SITE_LAT, lon=SITE_LON, tz=SITE_TZ):
     app has one less dependency to break. Same maths as the gap-filling
     pipeline uses, so the two agree about when daylight is.
     """
-    when = when or site_now()
+    when = when or datetime.now()
     jd = (pd.Timestamp(when.date()) - pd.Timedelta(hours=tz)).to_julian_date() + 0.5
     jc = (jd - 2451545.0) / 36525.0
     L0 = (280.46646 + jc * (36000.76983 + jc * 0.0003032)) % 360.0
@@ -573,7 +537,7 @@ def solar_day_bar(when=None):
     logger has stopped — and nothing on the page distinguished them. This
     does, before you read a single number.
     """
-    when = when or site_now()
+    when = when or datetime.now()
     rise, noon, set_ = _sun_times(when)
     now_h = when.hour + when.minute / 60 + when.second / 3600
 
@@ -913,41 +877,69 @@ def plot_gauge(value, max_value, title, unit="", color="#C77A16"):
 
 
 def plot_line_chart(df, x_col, y_cols, x_range=None, y_range=None, y_title=""):
-    """Multi-line Plotly chart (replaces st.line_chart for the Live
-    Monitoring charts) so the axes can be forced to explicit
-    min/max values instead of only auto-scaling. x_range/y_range are
-    optional (min, max) tuples — pass None to leave that axis on
-    autoscale."""
+    """Multi-line Plotly chart for Live Monitoring."""
+
     import plotly.graph_objects as go
 
     fig = go.Figure()
+
     for col in y_cols:
-        fig.add_trace(go.Scatter(x=df[x_col], y=df[col], mode="lines", name=str(col)))
+        # Make sure the Y values are numeric
+        y_data = pd.to_numeric(df[col], errors="coerce")
+
+        fig.add_trace(
+            go.Scatter(
+                x=df[x_col],
+                y=y_data,
+                mode="lines",
+                name=str(col),
+
+                # Explicitly make the line visible
+                line=dict(
+                    width=2,
+                ),
+
+                # Do not show individual markers
+                connectgaps=False,
+
+                hovertemplate=(
+                    f"<b>{col}</b><br>"
+                    "%{x|%b %d, %Y, %H:%M:%S}<br>"
+                    "%{y}<extra></extra>"
+                ),
+            )
+        )
 
     fig.update_layout(
         height=380,
         margin=dict(l=20, r=20, t=20, b=20),
+
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
-        # Axis titles and ticks were rendering too pale to read against the
-        # light background, and still named Inter after the switch to Manrope.
-        font={"family": "Manrope, sans-serif", "color": "#0F1B2A", "size": 13},
-        xaxis={"title_font": {"size": 13, "color": "#0F1B2A"},
-               "tickfont": {"size": 12, "color": "#3C4C58"},
-               "gridcolor": "#E3E9EF", "linecolor": "#C3CDD6", "zeroline": False},
-        yaxis={"title_font": {"size": 13, "color": "#0F1B2A"},
-               "tickfont": {"size": 12, "color": "#3C4C58"},
-               "gridcolor": "#E3E9EF", "linecolor": "#C3CDD6", "zeroline": False},
-        legend={"font": {"size": 12, "color": "#0F1B2A"}},
-        legend={"orientation": "h", "y": -0.2},
+
+        font={
+            "family": "Inter, sans-serif",
+            "color": "#1F2937",
+        },
+
+        legend={
+            "orientation": "h",
+            "y": -0.2,
+        },
+
         yaxis_title=y_title,
+
+        # Make sure Plotly does not hide the traces
+        showlegend=True,
     )
+
     if x_range is not None:
         fig.update_xaxes(range=list(x_range))
+
     if y_range is not None:
         fig.update_yaxes(range=list(y_range))
-    return fig
 
+    return fig
 
 # =========================
 # PLOTTING HELPERS
