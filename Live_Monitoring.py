@@ -304,13 +304,13 @@ def _historical_append_controls(key_prefix, available_files, download_fn, build_
             st.caption("Pick both a start and an end date.")
     elif mode == "From date":
         start_date = st.date_input(
-            "From", value=earliest, min_value=earliest, max_value=latest,
+            "≥", value=earliest, min_value=earliest, max_value=latest,
             key=f"{key_prefix}_from",
         )
         end_date = latest
     else:  # "Until date"
         end_date = st.date_input(
-            "Until", value=latest, min_value=earliest, max_value=latest,
+            "≤", value=latest, min_value=earliest, max_value=latest,
             key=f"{key_prefix}_until",
         )
         start_date = earliest
