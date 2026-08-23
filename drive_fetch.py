@@ -82,7 +82,7 @@ def _find_all_csvs_recursive(service, root_folder_id):
     return csv_files
  
  
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=1800)
 def list_available_csvs():
     """Returns a list of dicts (id, name, modifiedTime) for every CSV
     anywhere under the Drive folder (including year/month
@@ -260,7 +260,7 @@ def download_and_combine_csvs(file_entries: tuple) -> pd.DataFrame:
 # ones above.
 # =========================
  
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=1800)
 def list_available_dcm_csvs():
     """Same idea as list_available_csvs(), but for the DC meter CSVs
     under the separate 'panel-meter-data' Drive folder. Returns an
@@ -308,18 +308,50 @@ def download_dcm_csv_as_df(file_id: str) -> pd.DataFrame:
     return _standardize_dcm_columns(download_csv_as_df(file_id))
  
  
-@st.cache_data(ttl=None, persist="disk")
+@st.cache_data(ttl=None, persist="disk", max_entries=100)
+def _download_single_dcm_csv_cached(
+    file_id: str,
+    modified_time: str,
+) -> pd.DataFrame:
+    """
+    Cache each DC meter CSV independently.
+    """
+
+    return download_dcm_csv_as_df(file_id)
+
+
 def download_and_combine_dcm_csvs(file_entries: tuple) -> pd.DataFrame:
-    """Downloads several DC-meter CSVs, concatenates them, and standardizes
-    columns. Same (file_id, modified_time) cache-key trick as
-    download_and_combine_csvs — see its docstring."""
+    """
+    Download and combine requested DC meter CSVs.
+
+    Individual files are cached separately.
+    """
+
     dfs = []
-    for file_id, _modified_time in file_entries:
+
+    for file_id, modified_time in file_entries:
+
         try:
-            dfs.append(download_csv_as_df(file_id))
-        except Exception:
-            continue
+            df = _download_single_dcm_csv_cached(
+                file_id,
+                modified_time or "",
+            )
+
+            if df is not None and not df.empty:
+                dfs.append(df)
+
+        except Exception as exc:
+            st.warning(
+                f"Could not load one historical DC meter CSV: {exc}"
+            )
+
     if not dfs:
         return pd.DataFrame()
-    return _standardize_dcm_columns(pd.concat(dfs, ignore_index=True))
- 
+
+    combined = pd.concat(
+        dfs,
+        ignore_index=True,
+        copy=False,
+    )
+
+    return _standardize_dcm_columns(combined)
