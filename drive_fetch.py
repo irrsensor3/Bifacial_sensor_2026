@@ -471,13 +471,23 @@ def list_available_dcm_csvs():
  
  
 def _standardize_dcm_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """Renames a raw DC-meter CSV's columns (Datetime, Device_ID,
-    Forward_energy_kWh, Active_power_kW, Current_A, Voltage_V, Error)
-    to match the live Supabase panel_readings schema (created_at,
-    device_id, forward_energy_kwh, active_power_kw, current_a,
-    voltage_v, error), and parses created_at to a real datetime — so
-    historical and live DC meter data can be combined and handled
-    identically downstream."""
+    """
+    Standardize historical DC-meter CSV columns so they match the
+    live Supabase panel_readings schema.
+
+    The important part is created_at:
+    - Historical CSV timestamps may be timezone-naive.
+    - Live Supabase timestamps may be timezone-aware (UTC).
+
+    Convert everything to UTC and then remove the timezone information.
+    This gives both historical and live data the same timestamp type:
+
+        datetime64[ns]
+
+    This prevents:
+        TypeError: Cannot compare tz-naive and tz-aware timestamps
+    """
+
     rename_map = {
         "Datetime": "created_at",
         "Device_ID": "device_id",
@@ -487,9 +497,23 @@ def _standardize_dcm_columns(df: pd.DataFrame) -> pd.DataFrame:
         "Voltage_V": "voltage_v",
         "Error": "error",
     }
+
     df = df.rename(columns=rename_map)
+
     if "created_at" in df.columns:
-        df["created_at"] = pd.to_datetime(df["created_at"], errors="coerce")
+
+        # Parse timestamps and normalize them to UTC.
+        df["created_at"] = pd.to_datetime(
+            df["created_at"],
+            errors="coerce",
+            utc=True,
+        )
+
+        # Remove timezone information after converting to UTC.
+        # This makes historical timestamps compatible with any
+        # timezone-naive timestamps used elsewhere in the app.
+        df["created_at"] = df["created_at"].dt.tz_localize(None)
+
     return df
  
  
