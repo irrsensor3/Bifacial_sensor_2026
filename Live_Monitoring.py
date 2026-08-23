@@ -90,11 +90,18 @@ def _sync_drive_history_if_due(
     download_fn,
     build_created_at=None,
 ):
-    """Automatically refresh ONLY today's Drive data.
+    """
+    Refresh today's Drive data periodically.
 
-    Older historical ranges remain static after being loaded.
-    This prevents Streamlit Cloud from repeatedly rebuilding large
-    historical DataFrames.
+    Historical data already loaded into the session is NOT touched.
+
+    For today's data:
+        - check Drive every DRIVE_SYNC_INTERVAL_SECONDS
+        - if the CSV has not changed, do nothing
+        - if it changed, download the latest version
+        - replace only today's cached data
+
+    This prevents historical CSVs from being repeatedly processed.
     """
 
     if not available_files:
@@ -108,18 +115,13 @@ def _sync_drive_history_if_due(
         f"_{key_prefix}_end_date"
     )
 
-    if start_date is None or end_date is None:
-        return st.session_state.get(f"_{key_prefix}_df")
-
-    # ---------------------------------------------------------
-    # IMPORTANT:
-    # Automatically sync ONLY today's data.
-    # ---------------------------------------------------------
-
+    # Only automatically synchronize a single day.
     today = date.today()
 
     if start_date != today or end_date != today:
-        return st.session_state.get(f"_{key_prefix}_df")
+        return st.session_state.get(
+            f"_{key_prefix}_df"
+        )
 
     now = time.monotonic()
 
@@ -128,61 +130,109 @@ def _sync_drive_history_if_due(
         0.0,
     )
 
+    # Not time to sync yet.
     if now - last_sync < DRIVE_SYNC_INTERVAL_SECONDS:
         return st.session_state.get(
             f"_{key_prefix}_df"
         )
 
-    # Mark before downloading so repeated fragment refreshes
-    # cannot start multiple Drive downloads.
+    # ---------------------------------------------------------
+    # Find today's CSV
+    # ---------------------------------------------------------
+
+    today_files = resolve_period_files(
+        available_files,
+        today,
+        today,
+    )
+
+    if not today_files:
+        return st.session_state.get(
+            f"_{key_prefix}_df"
+        )
+
+    # Safety protection.
+    if len(today_files) > 10:
+
+        st.session_state[
+            f"_{key_prefix}_sync_error"
+        ] = (
+            f"Today's Drive folder contains "
+            f"{len(today_files)} CSV files. "
+            f"Automatic sync skipped."
+        )
+
+        return st.session_state.get(
+            f"_{key_prefix}_df"
+        )
+
+    # ---------------------------------------------------------
+    # Detect whether today's files actually changed
+    # ---------------------------------------------------------
+
+    current_signature = tuple(
+        (
+            f["id"],
+            f.get("modifiedTime", ""),
+        )
+        for f in today_files
+    )
+
+    previous_signature = st.session_state.get(
+        f"_{key_prefix}_today_signature"
+    )
+
+    # Mark sync time regardless of whether data changed.
     st.session_state[
         f"_{key_prefix}_last_sync_monotonic"
     ] = now
 
+    # Nothing changed on Drive.
+    if current_signature == previous_signature:
+        return st.session_state.get(
+            f"_{key_prefix}_df"
+        )
+
+    # ---------------------------------------------------------
+    # Download today's updated CSV
+    # ---------------------------------------------------------
+
     try:
 
-        period_files = resolve_period_files(
-            available_files,
-            start_date,
-            end_date,
-        )
-
-        if not period_files:
-            return st.session_state.get(
-                f"_{key_prefix}_df"
-            )
-
-        # Safety limit even for automatic syncing.
-        if len(period_files) > 31:
-            st.session_state[
-                f"_{key_prefix}_sync_error"
-            ] = (
-                f"Today's Drive range contains "
-                f"{len(period_files)} files; "
-                f"automatic sync skipped for safety."
-            )
-
-            return st.session_state.get(
-                f"_{key_prefix}_df"
-            )
-
-        df_hist = _load_range(
-            period_files,
+        df_today = _load_range(
+            today_files,
             download_fn,
             build_created_at,
-            start_date,
-            end_date,
+            today,
+            today,
         )
 
-        if df_hist is not None and not df_hist.empty:
-
-            st.session_state[
+        if df_today is None or df_today.empty:
+            return st.session_state.get(
                 f"_{key_prefix}_df"
-            ] = df_hist
+            )
 
-            st.session_state[
-                f"_{key_prefix}_label"
-            ] = f"{today:%d %b %Y}"
+        # -----------------------------------------------------
+        # Replace ONLY today's cached dataset.
+        #
+        # Historical data is never downloaded here.
+        # -----------------------------------------------------
+
+        st.session_state[
+            f"_{key_prefix}_df"
+        ] = df_today
+
+        st.session_state[
+            f"_{key_prefix}_today_signature"
+        ] = current_signature
+
+        st.session_state[
+            f"_{key_prefix}_label"
+        ] = f"{today:%d %b %Y}"
+
+        st.session_state[
+            f"_{key_prefix}_sync_error"
+        ] = None
 
     except Exception as exc:
 
@@ -193,7 +243,6 @@ def _sync_drive_history_if_due(
     return st.session_state.get(
         f"_{key_prefix}_df"
     )
-
 
 def _time_range_controls(key_prefix, data_min_t, data_max_t):
     """From/to date+time pickers for zooming a chart's X axis, in place of a
