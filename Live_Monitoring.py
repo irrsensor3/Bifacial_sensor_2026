@@ -1,5 +1,5 @@
 import calendar
-from datetime import date
+from datetime import date, datetime
 
 import streamlit as st
 import pandas as pd
@@ -74,6 +74,49 @@ def _load_range(period_files, download_fn, build_created_at, start_date, end_dat
         day_after_end = pd.Timestamp(end_date) + pd.Timedelta(days=1)
         df_hist = df_hist[(ca >= pd.Timestamp(start_date)) & (ca < day_after_end)]
     return df_hist
+
+
+def _time_range_controls(key_prefix, data_min_t, data_max_t):
+    """From/to date+time pickers for zooming a chart's X axis, in place of a
+    two-handle range slider. When the two ends of the loaded data are close
+    together (e.g. only a few hours of "today" logged so far), a slider's
+    handles overlap and become nearly impossible to grab separately,
+    especially by touch — typing or tapping a date and time directly has no
+    such problem."""
+    if data_min_t >= data_max_t:
+        st.caption("Only one timestamp in range — nothing to adjust yet.")
+        return data_min_t, data_max_t
+
+    start_col, end_col = st.columns(2)
+    with start_col:
+        st.caption("From")
+        start_date_v = st.date_input(
+            "From date", value=data_min_t.date(),
+            min_value=data_min_t.date(), max_value=data_max_t.date(),
+            key=f"{key_prefix}_start_date", label_visibility="collapsed",
+        )
+        start_time_v = st.time_input(
+            "From time", value=data_min_t.time(),
+            key=f"{key_prefix}_start_time", label_visibility="collapsed",
+        )
+    with end_col:
+        st.caption("To")
+        end_date_v = st.date_input(
+            "To date", value=data_max_t.date(),
+            min_value=data_min_t.date(), max_value=data_max_t.date(),
+            key=f"{key_prefix}_end_date", label_visibility="collapsed",
+        )
+        end_time_v = st.time_input(
+            "To time", value=data_max_t.time(),
+            key=f"{key_prefix}_end_time", label_visibility="collapsed",
+        )
+
+    x_start_t = datetime.combine(start_date_v, start_time_v)
+    x_end_t = datetime.combine(end_date_v, end_time_v)
+    if x_start_t >= x_end_t:
+        st.caption("'From' is after 'to' — showing the full range instead.")
+        return data_min_t, data_max_t
+    return x_start_t, x_end_t
 
 
 def _historical_append_controls(key_prefix, available_files, download_fn, build_created_at=None):
@@ -313,14 +356,8 @@ def render_live_monitoring():
             with st.expander("📐 Chart scale (optional)"):
                 data_min_t = combined["created_at"].min().to_pydatetime()
                 data_max_t = combined["created_at"].max().to_pydatetime()
-                if data_min_t < data_max_t:
-                    x_start_t, x_end_t = st.slider(
-                        "X range (time)", min_value=data_min_t, max_value=data_max_t,
-                        value=(data_min_t, data_max_t), key="live_irr_x_range",
-                    )
-                else:
-                    st.caption("Only one timestamp in range — X range slider needs more data.")
-                    x_start_t, x_end_t = data_min_t, data_max_t
+                st.caption("X range (time)")
+                x_start_t, x_end_t = _time_range_controls("live_irr_x", data_min_t, data_max_t)
 
                 irr_chart_auto = st.checkbox("Auto Y-axis", value=True, key="live_irr_y_auto")
                 y_min_col, y_max_col = st.columns(2)
@@ -477,14 +514,8 @@ def render_live_monitoring():
             with st.expander("📐 Chart scale (optional)"):
                 data_min_t = pivot_reset["created_at"].min().to_pydatetime()
                 data_max_t = pivot_reset["created_at"].max().to_pydatetime()
-                if data_min_t < data_max_t:
-                    dcm_x_start, dcm_x_end = st.slider(
-                        "X range (time)", min_value=data_min_t, max_value=data_max_t,
-                        value=(data_min_t, data_max_t), key="dcm_trend_x_range",
-                    )
-                else:
-                    st.caption("Only one timestamp in range — X range slider needs more data.")
-                    dcm_x_start, dcm_x_end = data_min_t, data_max_t
+                st.caption("X range (time)")
+                dcm_x_start, dcm_x_end = _time_range_controls("dcm_trend_x", data_min_t, data_max_t)
 
                 dcm_chart_auto = st.checkbox("Auto Y-axis", value=True, key="dcm_trend_y_auto")
                 default_min = float(pivot[meter_cols].min(numeric_only=True).min()) if not pivot.empty else 0.0
