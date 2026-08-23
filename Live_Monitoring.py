@@ -1,4 +1,5 @@
 import calendar
+import time
 from datetime import date, datetime
 
 import streamlit as st
@@ -74,6 +75,78 @@ def _load_range(period_files, download_fn, build_created_at, start_date, end_dat
         day_after_end = pd.Timestamp(end_date) + pd.Timedelta(days=1)
         df_hist = df_hist[(ca >= pd.Timestamp(start_date)) & (ca < day_after_end)]
     return df_hist
+
+
+# Google Drive historical data is intentionally much slower than the live
+# Supabase refresh.  Live data can refresh every 15 seconds, while Drive is
+# checked only once every 5 minutes.  This prevents repeated Drive downloads
+# from blocking/crashing the Streamlit app.
+DRIVE_SYNC_INTERVAL_SECONDS = 300
+
+
+def _sync_drive_history_if_due(
+    key_prefix,
+    available_files,
+    download_fn,
+    build_created_at=None,
+):
+    """Refresh the currently selected historical Drive range at most once
+    every DRIVE_SYNC_INTERVAL_SECONDS.
+
+    The range is stored in session_state.  This means the automatic sync is
+    not limited to today: if the user loaded a month/year/custom range, that
+    same range is refreshed when its Drive files change.
+
+    download_and_combine_* uses (file_id, modifiedTime) as its cache key, so
+    unchanged historical files remain disk-cached while a changed CSV is
+    downloaded again.
+    """
+    if not available_files:
+        return st.session_state.get(f"_{key_prefix}_df")
+
+    start_date = st.session_state.get(f"_{key_prefix}_start_date")
+    end_date = st.session_state.get(f"_{key_prefix}_end_date")
+    if start_date is None or end_date is None:
+        return st.session_state.get(f"_{key_prefix}_df")
+
+    now = time.monotonic()
+    last_sync = st.session_state.get(f"_{key_prefix}_last_sync_monotonic", 0.0)
+
+    if now - last_sync < DRIVE_SYNC_INTERVAL_SECONDS:
+        return st.session_state.get(f"_{key_prefix}_df")
+
+    # Mark the sync attempt before downloading so a slow/failed Drive request
+    # cannot be retriggered on every 15-second fragment tick.
+    st.session_state[f"_{key_prefix}_last_sync_monotonic"] = now
+
+    try:
+        period_files = resolve_period_files(
+            available_files, start_date, end_date
+        )
+        if not period_files:
+            return st.session_state.get(f"_{key_prefix}_df")
+
+        df_hist = _load_range(
+            period_files,
+            download_fn,
+            build_created_at,
+            start_date,
+            end_date,
+        )
+
+        # Keep the previous good dataset if Drive temporarily fails/returns
+        # nothing.  A transient Drive problem should not blank the graph.
+        if df_hist is not None and not df_hist.empty:
+            st.session_state[f"_{key_prefix}_df"] = df_hist
+            st.session_state[f"_{key_prefix}_label"] = (
+                f"{start_date:%d %b %Y} – {end_date:%d %b %Y}"
+                if start_date != end_date
+                else f"{start_date:%d %b %Y}"
+            )
+    except Exception as exc:
+        st.session_state[f"_{key_prefix}_sync_error"] = str(exc)
+
+    return st.session_state.get(f"_{key_prefix}_df")
 
 
 def _time_range_controls(key_prefix, data_min_t, data_max_t):
@@ -163,6 +236,9 @@ def _historical_append_controls(key_prefix, available_files, download_fn, build_
                 df_today = _load_range(today_files, download_fn, build_created_at, today, today)
                 st.session_state[f"_{key_prefix}_df"] = df_today
                 st.session_state[f"_{key_prefix}_label"] = f"{today:%d %b %Y}"
+                st.session_state[f"_{key_prefix}_start_date"] = today
+                st.session_state[f"_{key_prefix}_end_date"] = today
+                st.session_state[f"_{key_prefix}_last_sync_monotonic"] = time.monotonic()
 
     mode = st.radio(
         "Range", ["Month", "Year", "Date range", "From date", "Until date"],
@@ -226,7 +302,15 @@ def _historical_append_controls(key_prefix, available_files, download_fn, build_
         with st.spinner(f"Loading {len(period_files)} file(s)..."):
             df_hist = _load_range(period_files, download_fn, build_created_at, start_date, end_date)
         st.session_state[f"_{key_prefix}_df"] = df_hist
-        st.session_state[f"_{key_prefix}_label"] = f"{start_date:%d %b %Y} – {end_date:%d %b %Y}"
+        st.session_state[f"_{key_prefix}_label"] = (
+            f"{start_date:%d %b %Y} – {end_date:%d %b %Y}"
+            if start_date != end_date
+            else f"{start_date:%d %b %Y}"
+        )
+        st.session_state[f"_{key_prefix}_start_date"] = start_date
+        st.session_state[f"_{key_prefix}_end_date"] = end_date
+        st.session_state[f"_{key_prefix}_last_sync_monotonic"] = time.monotonic()
+        st.session_state[f"_{key_prefix}_sync_error"] = None
         st.success(f"Loaded {df_hist.shape[0]} rows from {start_date:%d %b %Y} – {end_date:%d %b %Y}")
     with remove_col:
         if st.session_state.get(f"_{key_prefix}_df") is not None:
@@ -236,11 +320,28 @@ def _historical_append_controls(key_prefix, available_files, download_fn, build_
             ):
                 st.session_state[f"_{key_prefix}_df"] = None
                 st.session_state[f"_{key_prefix}_label"] = None
+                st.session_state[f"_{key_prefix}_start_date"] = None
+                st.session_state[f"_{key_prefix}_end_date"] = None
+                st.session_state[f"_{key_prefix}_last_sync_monotonic"] = 0.0
+                st.session_state[f"_{key_prefix}_sync_error"] = None
                 st.rerun(scope="fragment")
+
+    # Refresh the currently loaded Drive range only every 5 minutes.
+    # This applies to TODAY as well as any older/custom range the user loaded.
+    _sync_drive_history_if_due(
+        key_prefix,
+        available_files,
+        download_fn,
+        build_created_at=build_created_at,
+    )
+
+    sync_error = st.session_state.get(f"_{key_prefix}_sync_error")
+    if sync_error:
+        st.caption("Drive sync temporarily unavailable; keeping the last good data.")
 
     label = st.session_state.get(f"_{key_prefix}_label")
     if label:
-        st.caption(f"Currently appended: {label}")
+        st.caption(f"Currently appended: {label} • Drive sync every 5 min")
 
     return st.session_state.get(f"_{key_prefix}_df"), label
 
