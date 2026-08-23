@@ -270,128 +270,56 @@ def _historical_append_controls(key_prefix, available_files, download_fn, build_
                 )
                 st.session_state[f"_{key_prefix}_last_sync_monotonic"] = time.monotonic()
 
-mode = st.radio(
-    "Range",
-    ["Month", "Year", "Date range", "≥ From date", "≤ Until date"],
-    horizontal=True,
-    key=f"{key_prefix}_mode",
-)
+    mode = st.radio(
+        "Range", ["Month", "Year", "Date range", "≥ From date", "≤ Until date"],
+        horizontal=True, key=f"{key_prefix}_mode",
+    )
 
-start_date = end_date = None
-
-if mode == "Month":
-
-    yr_col, mo_col = st.columns(2)
-
-    with yr_col:
-        yr = st.selectbox(
-            "Year",
-            sorted(years, reverse=True),
-            key=f"{key_prefix}_year",
+    start_date = end_date = None
+    if mode == "Month":
+        yr_col, mo_col = st.columns(2)
+        with yr_col:
+            yr = st.selectbox("Year", sorted(years, reverse=True), key=f"{key_prefix}_year")
+        year_files = [f for f in available_files if extract_year(f) == str(yr)]
+        months = sorted({extract_month(f) for f in year_files if extract_month(f).isdigit()})
+        if months:
+            with mo_col:
+                mo = st.selectbox(
+                    "Month", months, index=len(months) - 1,
+                    format_func=month_label, key=f"{key_prefix}_month",
+                )
+            start_date = date(yr, int(mo), 1)
+            end_date = date(yr, int(mo), calendar.monthrange(yr, int(mo))[1])
+    elif mode == "Year":
+        yr = st.selectbox("Year", sorted(years, reverse=True), key=f"{key_prefix}_yronly")
+        start_date, end_date = date(yr, 1, 1), date(yr, 12, 31)
+    elif mode == "Date range":
+        picked = st.date_input(
+            "From / to", value=(earliest, latest),
+            min_value=earliest, max_value=latest, key=f"{key_prefix}_range",
         )
-
-    year_files = [
-        f for f in available_files
-        if extract_year(f) == str(yr)
-    ]
-
-    months = sorted({
-        extract_month(f)
-        for f in year_files
-        if extract_month(f).isdigit()
-    })
-
-    if months:
-        with mo_col:
-            mo = st.selectbox(
-                "Month",
-                months,
-                index=len(months) - 1,
-                format_func=month_label,
-                key=f"{key_prefix}_month",
-            )
-
-        start_date = date(
-            yr,
-            int(mo),
-            1,
+        if isinstance(picked, tuple) and len(picked) == 2:
+            start_date, end_date = picked
+        else:
+            st.caption("Pick both a start and an end date.")
+    elif mode == "≥ From date":
+        start_date = st.date_input(
+            "≥", value=earliest, min_value=earliest, max_value=latest,
+            key=f"{key_prefix}_from",
         )
-
-        end_date = date(
-            yr,
-            int(mo),
-            calendar.monthrange(
-                yr,
-                int(mo),
-            )[1],
+        end_date = latest
+    elif mode == "≤ Until date":
+        end_date = st.date_input(
+            "≤", value=latest, min_value=earliest, max_value=latest,
+            key=f"{key_prefix}_until",
         )
-
-elif mode == "Year":
-
-    yr = st.selectbox(
-        "Year",
-        sorted(years, reverse=True),
-        key=f"{key_prefix}_yronly",
-    )
-
-    start_date = date(yr, 1, 1)
-    end_date = date(yr, 12, 31)
-
-elif mode == "Date range":
-
-    picked = st.date_input(
-        "From / to",
-        value=(earliest, latest),
-        min_value=earliest,
-        max_value=latest,
-        key=f"{key_prefix}_range",
-    )
-
-    if isinstance(picked, tuple) and len(picked) == 2:
-        start_date, end_date = picked
-    else:
-        st.caption("Pick both a start and an end date.")
-
-elif mode == "≥ From date":
-
-    start_date = st.date_input(
-        "≥",
-        value=earliest,
-        min_value=earliest,
-        max_value=latest,
-        key=f"{key_prefix}_from",
-    )
-
-    end_date = latest
-
-elif mode == "≤ Until date":
-
-    end_date = st.date_input(
-        "≤",
-        value=latest,
-        min_value=earliest,
-        max_value=latest,
-        key=f"{key_prefix}_until",
-    )
-
-    start_date = earliest
+        start_date = earliest
 
     if not start_date or not end_date or start_date > end_date:
         st.caption("Pick a valid range.")
         return st.session_state.get(f"_{key_prefix}_df"), st.session_state.get(f"_{key_prefix}_label")
 
     period_files = resolve_period_files(available_files, start_date, end_date)
-    st.caption(
-        f"{len(period_files)} file(s) found covering "
-        f"{start_date:%d %b %Y} – {end_date:%d %b %Y}"
-    )
-
-    period_files = resolve_period_files(
-        available_files,
-        start_date,
-        end_date,
-    )
-
     st.caption(
         f"{len(period_files)} file(s) found covering "
         f"{start_date:%d %b %Y} – {end_date:%d %b %Y}"
@@ -676,6 +604,7 @@ def render_live_monitoring():
             ]
             hist_slice = df_dcm_hist.reindex(columns=needed_cols).copy()
             live_slice = df_panel.reindex(columns=needed_cols).copy()
+
             # ---------------------------------------------------------
             # NORMALIZE TIMESTAMPS
             # ---------------------------------------------------------
@@ -686,26 +615,18 @@ def render_live_monitoring():
             # so pandas sees both as datetime64[ns].
             # ---------------------------------------------------------
             hist_slice["created_at"] = pd.to_datetime(
-                hist_slice["created_at"],
-                errors="coerce",
-                utc=True,
+                hist_slice["created_at"], errors="coerce", utc=True,
             ).dt.tz_localize(None)
 
             live_slice["created_at"] = pd.to_datetime(
-                live_slice["created_at"],
-                errors="coerce",
-                utc=True,
+                live_slice["created_at"], errors="coerce", utc=True,
             ).dt.tz_localize(None)
 
             # ---------------------------------------------------------
             # COMBINE HISTORICAL + LIVE
             # ---------------------------------------------------------
+            df_panel_combined = pd.concat([hist_slice, live_slice], ignore_index=True)
 
-            df_panel_combined = pd.concat(
-                [hist_slice, live_slice],
-                ignore_index=True,
-            )
-            
             # Remove invalid timestamps BEFORE sorting
             df_panel_combined = (
                 df_panel_combined
@@ -772,9 +693,7 @@ def render_live_monitoring():
             }[metric_choice]
 
             dcm_fig = plot_line_chart(
-                pivot_reset,
-                "created_at",
-                meter_cols,
+                pivot_reset, "created_at", meter_cols,
                 x_range=None,
                 y_range=None,
                 y_title=metric_axis_label,
