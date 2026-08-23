@@ -657,11 +657,6 @@ def render_live_monitoring():
             pivot.columns = [f"Meter {int(c)}" for c in pivot.columns]
             pivot_reset = pivot.reset_index()
             meter_cols = [c for c in pivot_reset.columns if c != "created_at"]
-            # DEBUG
-            
-            st.write("DEBUG selected devices:", selected_devices)
-            st.write("DEBUG meter columns:", meter_cols)
-            st.dataframe(pivot_reset.head(20))
 
             with st.expander("📐 Chart scale (optional)"):
                 data_min_t = pivot_reset["created_at"].min().to_pydatetime()
@@ -681,16 +676,6 @@ def render_live_monitoring():
             metric_axis_label = {
                 "voltage_v": "Voltage (V)", "current_a": "Current (A)", "active_power_kw": "Power (kW)",
             }[metric_choice]
-            
-            st.write("DEBUG pivot_reset:")
-            st.dataframe(pivot_reset.head(20))
-
-            st.write("DEBUG dtypes:")
-            st.write(pivot_reset.dtypes)
-
-            st.write("DEBUG min/max:")
-            st.write(pivot_reset[meter_cols].describe())
-
 
             dcm_fig = plot_line_chart(
                 pivot_reset,
