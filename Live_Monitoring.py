@@ -615,10 +615,47 @@ def render_live_monitoring():
                 "created_at", "device_id", "voltage_v", "current_a",
                 "active_power_kw", "forward_energy_kwh", "error",
             ]
-            hist_slice = df_dcm_hist.reindex(columns=needed_cols)
-            live_slice = df_panel.reindex(columns=needed_cols)
-            df_panel_combined = pd.concat([hist_slice, live_slice], ignore_index=True)
-            df_panel_combined = df_panel_combined.dropna(subset=["created_at"]).sort_values("created_at")
+            hist_slice = df_dcm_hist.reindex(columns=needed_cols).copy()
+live_slice = df_panel.reindex(columns=needed_cols).copy()
+
+# ---------------------------------------------------------
+# NORMALIZE TIMESTAMPS
+# ---------------------------------------------------------
+# Historical Drive data and live Supabase data may use
+# different timezone representations.
+#
+# Convert BOTH sides to UTC, then remove timezone information
+# so pandas sees both as datetime64[ns].
+# ---------------------------------------------------------
+
+hist_slice["created_at"] = pd.to_datetime(
+    hist_slice["created_at"],
+    errors="coerce",
+    utc=True,
+).dt.tz_localize(None)
+
+live_slice["created_at"] = pd.to_datetime(
+    live_slice["created_at"],
+    errors="coerce",
+    utc=True,
+).dt.tz_localize(None)
+
+# ---------------------------------------------------------
+# COMBINE HISTORICAL + LIVE
+# ---------------------------------------------------------
+
+df_panel_combined = pd.concat(
+    [hist_slice, live_slice],
+    ignore_index=True,
+)
+
+# Remove invalid timestamps BEFORE sorting
+df_panel_combined = (
+    df_panel_combined
+    .dropna(subset=["created_at"])
+    .sort_values("created_at")
+    .reset_index(drop=True)
+)
 
         st.markdown("### Trend")
         device_ids = sorted(df_panel_combined["device_id"].dropna().unique().tolist())
