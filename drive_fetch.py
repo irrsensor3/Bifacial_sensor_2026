@@ -398,18 +398,25 @@ def download_and_combine_csvs(file_entries: tuple) -> pd.DataFrame:
 # =========================
  
 @st.cache_data(ttl=1800)
-def list_available_dcm_csvs():
+def list_available_dcm_csvs(include_avg=False):
     """
-    Returns the actual daily DCM CSV files under panel-meter-data.
+    Returns DCM 3366 CSV files under panel-meter-data.
 
-    Accepts:
-        YYYY-MM-DD_dcm_3366_bifaical.csv
+    include_avg=False:
+        Returns normal daily CSVs only.
 
-    Rejects:
-        YYYY-MM-DD_dcm_3366_bifaical_avg.csv
+    include_avg=True:
+        Returns daily average CSVs only.
 
-    Also ignores unrelated CSV files.
+    Examples:
+
+        Normal:
+            2026-08-23_dcm_3366_bifaical.csv
+
+        Average:
+            2026-08-23_dcm_3366_bifaical_avg.csv
     """
+
     try:
         service = _get_drive_service()
 
@@ -429,24 +436,30 @@ def list_available_dcm_csvs():
         files = []
 
         for f in all_files:
+
             name = f.get("name", "").lower()
 
-            # Must be a CSV
+            # Must be CSV
             if not name.endswith(".csv"):
                 continue
 
-            # Must be a DCM 3366 file
+            # Must be DCM 3366
             if "_dcm_3366_" not in name:
-                continue
-
-            # IMPORTANT:
-            # Ignore average files
-            if "_avg.csv" in name:
                 continue
 
             # Must begin with YYYY-MM-DD
             if not re.match(r"^\d{4}-\d{2}-\d{2}_", name):
                 continue
+
+            is_avg = "_avg.csv" in name
+
+            # Select either normal or average files
+            if include_avg:
+                if not is_avg:
+                    continue
+            else:
+                if is_avg:
+                    continue
 
             files.append(f)
 
