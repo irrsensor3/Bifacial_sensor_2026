@@ -24,7 +24,73 @@ from drive_fetch import (
     download_and_combine_dcm_csvs,
 )
 
+def _prepare_plot_data(
+    df: pd.DataFrame,
+    timestamp_col: str = "created_at",
+) -> pd.DataFrame:
+    """Reduce large historical datasets before sending them to Plotly.
 
+    Raw data is preserved. Only the copy used for plotting is aggregated.
+    """
+    if df.empty or timestamp_col not in df.columns:
+        return df
+
+    work = df.copy()
+
+    work[timestamp_col] = pd.to_datetime(
+        work[timestamp_col],
+        errors="coerce",
+    )
+
+    work = (
+        work
+        .dropna(subset=[timestamp_col])
+        .sort_values(timestamp_col)
+    )
+
+    if work.empty:
+        return work
+
+    span = work[timestamp_col].max() - work[timestamp_col].min()
+
+    # Short ranges: keep the original resolution.
+    if span <= pd.Timedelta(days=7):
+        return work
+
+    # Longer ranges: progressively reduce the plotting resolution.
+    if span <= pd.Timedelta(days=30):
+        rule = "5min"
+    elif span <= pd.Timedelta(days=90):
+        rule = "15min"
+    elif span <= pd.Timedelta(days=180):
+        rule = "30min"
+    else:
+        rule = "1h"
+
+    value_cols = [
+        c for c in work.columns
+        if c != timestamp_col
+    ]
+
+    # Only aggregate numeric columns.
+    numeric_cols = work[value_cols].select_dtypes(
+        include="number"
+    ).columns.tolist()
+
+    if not numeric_cols:
+        return work
+
+    plot_df = (
+        work[[timestamp_col] + numeric_cols]
+        .set_index(timestamp_col)
+        .resample(rule)
+        .mean()
+        .dropna(how="all")
+        .reset_index()
+    )
+
+    return plot_df
+    
 def st_autorefresh_builtin(seconds: int):
     """Re-run the page every `seconds`, using whatever the installed Streamlit
     provides. st.autorefresh exists on newer builds; older ones fall back to a
@@ -549,8 +615,12 @@ def render_live_monitoring():
                 with y_max_col:
                     irr_chart_ymax = st.number_input("Y max (W/m²)", value=1200.0, key="live_irr_ymax", disabled=irr_chart_auto)
 
+            combined_plot = _prepare_plot_data(combined)
+
             fig = plot_line_chart(
-                combined, "created_at", selected_live_irr,
+                combined_plot,
+                "created_at",
+                selected_live_irr,
                 x_range=(x_start_t, x_end_t),
                 y_range=None if irr_chart_auto else (irr_chart_ymin, irr_chart_ymax),
                 y_title="Irradiance (W/m²)",
@@ -741,6 +811,7 @@ def render_live_monitoring():
             pivot.columns = [f"Meter {int(c)}" for c in pivot.columns]
             pivot_reset = pivot.reset_index()
             meter_cols = [c for c in pivot_reset.columns if c != "created_at"]
+            pivot_plot = _prepare_plot_data(pivot_reset)
 
             with st.expander("📐 Chart scale (optional)"):
                 data_min_t = pivot_reset["created_at"].min().to_pydatetime()
@@ -762,7 +833,9 @@ def render_live_monitoring():
             }[metric_choice]
 
             dcm_fig = plot_line_chart(
-                pivot_reset, "created_at", meter_cols,
+                pivot_plot,
+                "created_at",
+                meter_cols,
                 x_range=None,
                 y_range=None,
                 y_title=metric_axis_label,
