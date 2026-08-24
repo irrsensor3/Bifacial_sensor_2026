@@ -488,18 +488,49 @@ def render_live_monitoring():
         )
         if selected_live_irr:
             combined = df_live[["created_at"] + selected_live_irr].copy()
-            combined["created_at"] = pd.to_datetime(combined["created_at"])
 
+            # Normalize LIVE timestamps
+            combined["created_at"] = (
+                pd.to_datetime(
+                    combined["created_at"],
+                    errors="coerce",
+                    utc=True,
+                )
+                .dt.tz_localize(None)
+            )
+            
             if df_hist is not None and not df_hist.empty:
                 hist = df_hist.copy()
+            
                 for c in selected_live_irr:
                     if c not in hist.columns:
                         hist[c] = pd.NA
-                hist_slice = hist[["created_at"] + selected_live_irr]
-                combined = pd.concat([hist_slice, combined], ignore_index=True)
-
-            combined = combined.dropna(subset=["created_at"]).sort_values("created_at")
-
+            
+                hist_slice = hist[["created_at"] + selected_live_irr].copy()
+            
+                # Normalize HISTORICAL timestamps
+                hist_slice["created_at"] = (
+                    pd.to_datetime(
+                        hist_slice["created_at"],
+                        errors="coerce",
+                        utc=True,
+                    )
+                    .dt.tz_localize(None)
+                )
+            
+                combined = pd.concat(
+                    [hist_slice, combined],
+                    ignore_index=True,
+                )
+            
+            # Both historical and live timestamps are now
+            # timezone-naive UTC timestamps.
+            combined = (
+                combined
+                .dropna(subset=["created_at"])
+                .sort_values("created_at")
+                .reset_index(drop=True)
+            )
             with st.expander("📐 Chart scale (optional)"):
                 data_min_t = combined["created_at"].min().to_pydatetime()
                 data_max_t = combined["created_at"].max().to_pydatetime()
