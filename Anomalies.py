@@ -225,8 +225,7 @@ def _render_findings(records, empty_message):
 
 def render_anomalies():
     require_login()
-    st.write("SMTP_USER exists:", "SMTP_USER" in st.secrets)
-    st.write("SMTP_PASSWORD exists:", "SMTP_PASSWORD" in st.secrets)
+    st.write("Loaded Streamlit secret keys:", list(st.secrets.keys()))
     page_stamp("Anomalies")
     st.title("Anomaly detection")
     st.caption(
