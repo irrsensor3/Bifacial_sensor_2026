@@ -28,9 +28,13 @@ def _prepare_plot_data(
     df: pd.DataFrame,
     timestamp_col: str = "created_at",
 ) -> pd.DataFrame:
-    """Reduce large historical datasets before sending them to Plotly.
+    """Prepare data for plotting.
 
-    Raw data is preserved. Only the copy used for plotting is aggregated.
+    <= 1 month       -> raw data
+    > 1 to 6 months  -> 1-hour averages
+    > 6 months       -> 4-hour averages
+
+    The original dataframe is never modified.
     """
     if df.empty or timestamp_col not in df.columns:
         return df
@@ -53,26 +57,23 @@ def _prepare_plot_data(
 
     span = work[timestamp_col].max() - work[timestamp_col].min()
 
-    # Short ranges: keep the original resolution.
-    if span <= pd.Timedelta(days=7):
+    # 1 month or less → keep raw resolution
+    if span <= pd.Timedelta(days=31):
         return work
 
-    # Longer ranges: progressively reduce the plotting resolution.
-    if span <= pd.Timedelta(days=30):
-        rule = "5min"
-    elif span <= pd.Timedelta(days=90):
-        rule = "15min"
-    elif span <= pd.Timedelta(days=180):
-        rule = "30min"
-    else:
+    # More than 1 month up to 6 months → 1-hour average
+    if span <= pd.Timedelta(days=183):
         rule = "1h"
+
+    # More than 6 months → 4-hour average
+    else:
+        rule = "4h"
 
     value_cols = [
         c for c in work.columns
         if c != timestamp_col
     ]
 
-    # Only aggregate numeric columns.
     numeric_cols = work[value_cols].select_dtypes(
         include="number"
     ).columns.tolist()
@@ -155,7 +156,6 @@ def _load_range(period_files, download_fn, build_created_at, start_date, end_dat
     
         df_hist["created_at"] = ca.loc[df_hist.index]
     
-        df_hist["created_at"] = ca
     return df_hist
 
 
