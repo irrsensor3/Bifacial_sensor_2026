@@ -71,18 +71,23 @@ def _load_range(period_files, download_fn, build_created_at, start_date, end_dat
     if build_created_at is not None:
         df_hist = build_created_at(df_hist)
     if "created_at" in df_hist.columns:
-        ca = pd.to_datetime(
-            df_hist["created_at"],
-            errors="coerce",
-            utc=True,
-        ).dt.tz_localize(None)
+        ca = (
+            pd.to_datetime(
+                df_hist["created_at"],
+                errors="coerce",
+                utc=True,
+            )
+            .dt.tz_localize(None)
+        )
     
         day_after_end = pd.Timestamp(end_date) + pd.Timedelta(days=1)
     
         df_hist = df_hist[
             (ca >= pd.Timestamp(start_date)) &
             (ca < day_after_end)
-        ]
+        ].copy()
+    
+        df_hist["created_at"] = ca.loc[df_hist.index]
     
         df_hist["created_at"] = ca
     return df_hist
