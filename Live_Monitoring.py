@@ -71,9 +71,20 @@ def _load_range(period_files, download_fn, build_created_at, start_date, end_dat
     if build_created_at is not None:
         df_hist = build_created_at(df_hist)
     if "created_at" in df_hist.columns:
-        ca = pd.to_datetime(df_hist["created_at"], errors="coerce")
+        ca = pd.to_datetime(
+            df_hist["created_at"],
+            errors="coerce",
+            utc=True,
+        ).dt.tz_localize(None)
+    
         day_after_end = pd.Timestamp(end_date) + pd.Timedelta(days=1)
-        df_hist = df_hist[(ca >= pd.Timestamp(start_date)) & (ca < day_after_end)]
+    
+        df_hist = df_hist[
+            (ca >= pd.Timestamp(start_date)) &
+            (ca < day_after_end)
+        ]
+    
+        df_hist["created_at"] = ca
     return df_hist
 
 
@@ -599,7 +610,7 @@ def render_live_monitoring():
                 key="dcm_historical_data_type",
             )
         
-            use_avg = dcm_data_type == "Daily average"
+            use_avg = dcm_data_type == "Average"
         
             available_dcm_files = list_available_dcm_csvs(
                 include_avg=use_avg
