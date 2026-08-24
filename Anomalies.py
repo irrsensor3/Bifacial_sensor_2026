@@ -41,18 +41,29 @@ FAULT_EXPLAIN = {
     "disconnection": "Both current and voltage gone — the panel is not connected.",
     "datetime": "A problem with the timestamps themselves rather than a reading.",
 }
+
 def send_alert_email(subject: str, body: str) -> bool:
     """Sends an anomaly notification email using Streamlit secrets."""
     try:
-        # Check if credentials exist before attempting to send
-        if "SMTP_USER" not in st.secrets or "SMTP_PASSWORD" not in st.secrets:
-            st.warning("Email credentials missing in secrets.toml. Alert not sent.")
+        missing = []
+
+        if "SMTP_USER" not in st.secrets:
+            missing.append("SMTP_USER")
+
+        if "SMTP_PASSWORD" not in st.secrets:
+            missing.append("SMTP_PASSWORD")
+
+        if missing:
+            st.error(
+                f"Missing Streamlit secrets: {', '.join(missing)}"
+            )
             return False
 
         smtp_host = st.secrets.get("SMTP_HOST", "smtp.gmail.com")
         smtp_port = int(st.secrets.get("SMTP_PORT", 587))
         smtp_user = st.secrets["SMTP_USER"]
         smtp_password = st.secrets["SMTP_PASSWORD"]
+
         sender = st.secrets.get("ALERT_EMAIL_FROM", smtp_user)
         recipient = st.secrets.get("ALERT_EMAIL_TO", smtp_user)
 
@@ -68,6 +79,7 @@ def send_alert_email(subject: str, body: str) -> bool:
             server.sendmail(sender, [recipient], msg.as_string())
 
         return True
+
     except Exception as e:
         st.error(f"Failed to send email alert: {e}")
         return False
