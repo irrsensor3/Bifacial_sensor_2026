@@ -504,6 +504,12 @@ def inject_theme():
 # Site coordinates, used for the solar day bar. Puchong, Selangor.
 SITE_LAT, SITE_LON, SITE_TZ = 3.02, 101.62, 8.0
 
+# datetime.now() returns the server's own clock, which on Streamlit Cloud
+# (and most hosts) is UTC, not Malaysia time. Anchoring explicitly to this
+# zone keeps "now" correct regardless of what timezone the server runs in.
+from zoneinfo import ZoneInfo
+SITE_ZONE = ZoneInfo("Asia/Kuala_Lumpur")
+
 
 def _sun_times(when=None, lat=SITE_LAT, lon=SITE_LON, tz=SITE_TZ):
     """Sunrise, solar noon and sunset for the site, in local hours.
@@ -512,7 +518,7 @@ def _sun_times(when=None, lat=SITE_LAT, lon=SITE_LON, tz=SITE_TZ):
     app has one less dependency to break. Same maths as the gap-filling
     pipeline uses, so the two agree about when daylight is.
     """
-    when = when or datetime.now()
+    when = when or datetime.now(SITE_ZONE)
     jd = (pd.Timestamp(when.date()) - pd.Timedelta(hours=tz)).to_julian_date() + 0.5
     jc = (jd - 2451545.0) / 36525.0
     L0 = (280.46646 + jc * (36000.76983 + jc * 0.0003032)) % 360.0
@@ -549,7 +555,7 @@ def solar_day_bar(when=None):
     logger has stopped — and nothing on the page distinguished them. This
     does, before you read a single number.
     """
-    when = when or datetime.now()
+    when = when or datetime.now(SITE_ZONE)
     rise, noon, set_ = _sun_times(when)
     now_h = when.hour + when.minute / 60 + when.second / 3600
 
