@@ -192,6 +192,18 @@ def inject_theme():
 
         .stApp { background-color: var(--base); color: var(--ink); }
         body, p, div, span, label, button, input { font-family: var(--sans); }
+        
+         /* Streamlit renders built-in icons (sidebar collapse arrows, etc.) as
+           text glyphs that depend on the Material Symbols font. The rule
+           above overrides that font on every span, including these, so the
+           icon name prints as literal text instead of a glyph. Carve icons
+           back out. */
+        [data-testid="stIconMaterial"],
+        span[class*="material-icons"],
+        span[class*="material-symbols"] {
+            font-family: 'Material Symbols Outlined', 'Material Symbols Rounded',
+                          'Material Icons' !important;
+        }
 
         h1 {
             font-family: var(--sans) !important;
