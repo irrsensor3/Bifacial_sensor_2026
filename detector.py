@@ -57,10 +57,16 @@ NEGATIVE_CASES = {
                        "not to a fixed voltage",
     "monofacial": "devices 27-30 read ~7.7% low because they are monofacial",
 }
-
+# Nocturnal offset:
+# An irradiance sensor should be close to zero when the sun is sufficiently
+# below the horizon. A small amount of residual signal is allowed for sensor
+# noise, dark current, reflections, etc.
+NOCTURNAL_IRR_THRESHOLD = 20.0      # W/m²
+NOCTURNAL_MIN_SAMPLES = 10
+NOCTURNAL_MIN_FRACTION = 0.20       # 20% of nighttime samples
 
 # =============================================================================
-#  1. DATETIME FAULTS
+#  DATETIME FAULTS
 # =============================================================================
 
 def detect_datetime_faults(raw_index, interval_s):
@@ -117,10 +123,105 @@ def detect_datetime_faults(raw_index, interval_s):
                     "count": back, "severity": "high",
                     "detail": f"time moved backwards {back} time(s)"})
     return out
+# =============================================================================
+#  NOCTURNAL OFFSET
+# =============================================================================
 
+def detect_nocturnal_offset(grid, found, day_label):
+    """Detect irradiance sensors reporting meaningful irradiance at night.
+
+    During sufficiently dark periods, irradiance should be close to zero.
+    A persistent positive reading may indicate sensor offset, calibration
+    error, wiring problems, or a sensor that is not returning to its
+    expected baseline.
+
+    This detector deliberately avoids a simple clock-based definition of
+    night. It uses the available irradiance channels themselves to establish
+    when the array is actually dark, which avoids falsely classifying dawn
+    and dusk as nighttime.
+    """
+    out = []
+
+    if "Irr" not in found:
+        return out
+
+    cols = found["Irr"]
+    if not cols:
+        return out
+
+    # Build irradiance frame.
+    irr = pd.DataFrame({
+        p: pd.to_numeric(grid[col], errors="coerce")
+        for p, col in cols.items()
+    })
+
+    if irr.empty:
+        return out
+
+    # Use the median of all available irradiance sensors as the array-level
+    # reference. When essentially the whole array is dark, this should be
+    # close to zero.
+    array_ref = irr.median(axis=1)
+
+    # Define nighttime conservatively.
+    #
+    # If the whole array is below the nocturnal threshold, it is considered
+    # dark. This prevents dawn/dusk from being classified as nighttime.
+    night = array_ref <= NOCTURNAL_IRR_THRESHOLD
+
+    if night.sum() < NOCTURNAL_MIN_SAMPLES:
+        return out
+
+    night_data = irr.loc[night]
+
+    for panel, series in night_data.items():
+        valid = series.dropna()
+
+        if len(valid) < NOCTURNAL_MIN_SAMPLES:
+            continue
+
+        # Count readings that are meaningfully above zero while the array
+        # itself is considered dark.
+        elevated = valid > NOCTURNAL_IRR_THRESHOLD
+
+        fraction = float(elevated.mean())
+
+        if fraction < NOCTURNAL_MIN_FRACTION:
+            continue
+
+        median_offset = float(valid[elevated].median()) \
+            if elevated.any() else 0.0
+
+        max_value = float(valid.max())
+
+        # Stronger readings and a larger fraction of the night make the
+        # finding more serious.
+        severity = "high" if (
+            fraction >= 0.50 and median_offset >= 50
+        ) else "medium"
+
+        out.append({
+            "type": "nocturnal_offset",
+            "family": "Irr",
+            "panel": panel,
+            "day": day_label,
+            "fraction_of_night": round(fraction, 3),
+            "median_offset": round(median_offset, 2),
+            "max_value": round(max_value, 2),
+            "severity": severity,
+            "detail": (
+                f"Irr_{panel} reported more than "
+                f"{NOCTURNAL_IRR_THRESHOLD:.0f} W/m² during "
+                f"{100*fraction:.0f}% of detected nighttime samples "
+                f"(median elevated reading {median_offset:.1f} W/m², "
+                f"maximum {max_value:.1f} W/m²)"
+            ),
+        })
+
+    return out
 
 # =============================================================================
-#  2. PEER COMPARISON
+#   PEER COMPARISON
 # =============================================================================
 
 # Match peers on position as well as face where there are enough of them.
@@ -223,7 +324,7 @@ def detect_comparison_faults(grid, found, fam, day_label):
 
 
 # =============================================================================
-#  3. LOW CURRENT
+#  LOW CURRENT
 # =============================================================================
 
 def detect_low_current(grid, found, day_label):
@@ -275,7 +376,7 @@ def detect_low_current(grid, found, day_label):
 
 
 # =============================================================================
-#  4. DIODE FAULTS
+#  DIODE FAULTS
 # =============================================================================
 
 def detect_diode_faults(grid, found, day_label):
@@ -334,7 +435,7 @@ def detect_diode_faults(grid, found, day_label):
 
 
 # =============================================================================
-#  4b. Y-CONNECTOR BRANCH FAILURE
+#  Y-CONNECTOR BRANCH FAILURE
 # =============================================================================
 #  Each panel feeds its meter through a Y connector, with a cheap diode on each
 #  of the two branches. If a diode fails open, the meter loses one branch.
@@ -450,7 +551,7 @@ def detect_branch_failure(grid, found, day_label):
 
 
 # =============================================================================
-#  5. PERSISTENCE
+#  PERSISTENCE
 # =============================================================================
 
 def require_persistence(findings, min_days=PERSIST_DAYS):
@@ -485,7 +586,7 @@ def require_persistence(findings, min_days=PERSIST_DAYS):
 
 
 # =============================================================================
-#  6. MAIN
+#  MAIN
 # =============================================================================
 
 ANOMALY_TABLE = "sensor_anomalies"
@@ -557,8 +658,25 @@ def run_on_frame(wide, interval_s=None, label="supabase"):
 
     for day, chunk in grid.groupby(grid.index.normalize()):
         day_label = str(day.date())
+    
         if len(chunk) < MIN_SAMPLES:
             continue
+    
+        findings += detect_nocturnal_offset(
+            chunk,
+            found,
+            day_label
+        )
+
+    for day, chunk in grid.groupby(grid.index.normalize()):
+        day_label = str(day.date())
+        if len(chunk) < MIN_SAMPLES:
+            continue
+        findings += detect_nocturnal_offset(
+            chunk,
+            found,
+            day_label
+        )
         for fam in found:
             if G.CHANNELS.get(fam, {}).get("derived"):
                 continue
@@ -596,8 +714,16 @@ def run(data_root=None, out_dir=None, push=False):
 
     for day, chunk in grid.groupby(grid.index.normalize()):
         label = str(day.date())
+    
         if len(chunk) < MIN_SAMPLES:
             continue
+    
+        findings += detect_nocturnal_offset(
+            chunk,
+            found,
+            label
+        )
+    
         for fam in found:
             if G.CHANNELS.get(fam, {}).get("derived"):
                 continue   # derived channels inherit their inputs' faults
