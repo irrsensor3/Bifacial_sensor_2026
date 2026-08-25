@@ -4,9 +4,6 @@ from ui_sections import (
     require_login,
     page_stamp,
     supabase,
-    get_forced_sensors,
-    set_sensor_force,
-    NUM_SENSORS,
 )
 
 
@@ -69,54 +66,6 @@ def render_admin_controls():
                     if st.button("Cancel", key=f"{cmd}_no", use_container_width=True):
                         st.session_state[pending] = False
                         st.rerun()
-
-    # -------------------------------------------------
-    # FORCE LOGGING BELOW 0°C — per sensor (1-24)
-    # -------------------------------------------------
-    st.divider()
-    st.subheader("Logging below 0 °C")
-    st.caption(
-        "By default a reading below 0 °C is discarded as invalid. Turn a sensor "
-        "on here to keep those readings anyway. Sensors set to keep logging are "
-        "marked ON and filled; the rest are outlined. The Pi checks this about "
-        "once a minute, so a change can take up to a minute to apply."
-    )
-
-    forced_sensors = get_forced_sensors()
-
-    # 6 columns x 4 rows = 24 sensor toggle buttons
-    SENSORS_PER_ROW = 6
-    for row_start in range(1, NUM_SENSORS + 1, SENSORS_PER_ROW):
-        row_ids = range(row_start, min(row_start + SENSORS_PER_ROW, NUM_SENSORS + 1))
-        cols = st.columns(SENSORS_PER_ROW)
-        for col, sid in zip(cols, row_ids):
-            is_forced = sid in forced_sensors
-            # State is carried by the text and the button variant, not colour
-            # alone, so it survives greyscale, colour blindness and readers.
-            with col:
-                if st.button(
-                    f"{sid} · ON" if is_forced else f"{sid}",
-                    key=f"force_btn_{sid}",
-                    use_container_width=True,
-                    type="primary" if is_forced else "secondary",
-                    help=(f"Sensor {sid} keeps logging below 0 °C. Select to stop."
-                          if is_forced else
-                          f"Sensor {sid} discards readings below 0 °C. Select to keep them."),
-                ):
-                    if set_sensor_force(sid, not is_forced):
-                        st.rerun()
-                    else:
-                        st.error(
-                            f"Sensor {sid} was not updated — the database write "
-                            f"failed. Check the connection and try again."
-                        )
-
-    if forced_sensors:
-        st.caption(
-            "Currently forced: " + ", ".join(str(s) for s in sorted(forced_sensors))
-        )
-    else:
-        st.caption("No sensors currently forced — sub-zero cutoff applies to all.")
 
     # -------------------------
     # Diagnostics
