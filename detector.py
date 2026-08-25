@@ -73,6 +73,7 @@ FLATLINE_VALUE_TOLERANCE = {
     "T": 0.05,       # °C
 }
 FLATLINE_MIN_FRACTION = 0.20
+FLATLINE_DAYLIGHT_IRR = 50.0
 
 #  INTERMITTENT CURRENT FLICKERING
 FLICKER_MIN_SAMPLES = 200
@@ -133,7 +134,165 @@ BIFACIAL_ROWS = {
     },
 }
 
+# =============================================================================
+#  OUT-OF-BOUNDS CHECKS
+# =============================================================================
+# Physical / sensor validity limits.
+#
+# These are deliberately conservative. The purpose is to catch readings that
+# are physically impossible or clearly invalid, not normal operating extremes.
 
+OUT_OF_BOUNDS_LIMITS = {
+    "Irr": {
+        "min": 0.0,       # W/m²
+        "max": 1500.0,    # W/m²
+    },
+    "T": {
+        "min": -20.0,     # °C
+        "max": 100.0,     # °C
+    },
+    "I": {
+        "min": 0.0,       # A
+        "max": 30.0,      # A
+    },
+    "V": {
+        "min": 0.0,       # V
+        "max": 100.0,     # V
+    },
+}
+
+# =============================================================================
+#  TILT-AWARE NORMALIZATION
+# =============================================================================
+
+# Panel tilt angle in degrees.
+#
+# Replace these values with the actual physical tilt angles from your
+# installation / Panel_array.py configuration.
+#
+# Example:
+#   Position 1 -> 0°
+#   Position 2 -> 10°
+#   Position 3 -> 20°
+#   Position 4 -> 30°
+
+PANEL_TILT = {
+    1: 0.0,
+    2: 10.0,
+    3: 20.0,
+    4: 30.0,
+}
+
+# =============================================================================
+#  OUT-OF-BOUNDS CHECKS
+# =============================================================================
+
+def detect_out_of_bounds(grid, found, day_label):
+    """Detect physically impossible or clearly invalid sensor readings.
+
+    Each sensor family is checked against its own physical validity range.
+
+    This detector is intentionally independent of peer comparison. A reading
+    can be abnormal even when all of its peers are also abnormal, and a single
+    impossible reading should still be reported even if the rest of the array
+    is healthy.
+
+    Examples:
+        Irr < 0 W/m²
+        Irr > physically plausible maximum
+        Temperature outside sensor/application limits
+        Negative current
+        Negative voltage
+    """
+
+    out = []
+
+    if grid is None or grid.empty:
+        return out
+
+    for fam, limits in OUT_OF_BOUNDS_LIMITS.items():
+
+        cols = found.get(fam, {})
+
+        if not cols:
+            continue
+
+        lower = limits.get("min")
+        upper = limits.get("max")
+
+        for panel, col in cols.items():
+
+            series = pd.to_numeric(
+                grid[col],
+                errors="coerce"
+            )
+
+            valid = series.notna()
+
+            if not valid.any():
+                continue
+
+            low = valid & (series < lower)
+            high = valid & (series > upper)
+
+            low_count = int(low.sum())
+            high_count = int(high.sum())
+            total_bad = low_count + high_count
+
+            if total_bad == 0:
+                continue
+
+            bad_values = series[low | high]
+
+            min_bad = float(bad_values.min())
+            max_bad = float(bad_values.max())
+
+            total_valid = int(valid.sum())
+            fraction = total_bad / total_valid if total_valid else 0.0
+
+            # A physically impossible value is serious even if it happens
+            # only once. Repeated invalid values are also reported.
+            severity = (
+                "high"
+                if fraction >= 0.05 or total_bad >= 20
+                else "medium"
+            )
+
+            directions = []
+
+            if low_count:
+                directions.append(
+                    f"{low_count:,} below {lower:g}"
+                )
+
+            if high_count:
+                directions.append(
+                    f"{high_count:,} above {upper:g}"
+                )
+
+            out.append({
+                "type": "out_of_bounds",
+                "family": fam,
+                "panel": panel,
+                "day": day_label,
+                "lower_limit": lower,
+                "upper_limit": upper,
+                "bad_samples": total_bad,
+                "bad_fraction": round(fraction, 4),
+                "low_count": low_count,
+                "high_count": high_count,
+                "minimum_bad_value": round(min_bad, 3),
+                "maximum_bad_value": round(max_bad, 3),
+                "severity": severity,
+                "detail": (
+                    f"{fam}_{panel} produced {total_bad:,} out-of-bounds "
+                    f"reading(s): {', '.join(directions)}; "
+                    f"observed invalid range "
+                    f"{min_bad:.3g} to {max_bad:.3g}"
+                ),
+            })
+
+    return out
 # =============================================================================
 #  DATETIME FAULTS
 # =============================================================================
@@ -569,20 +728,6 @@ def detect_nocturnal_offset(grid, found, day_label):
 # =============================================================================
 #  SENSOR FLATLINING
 # =============================================================================
-
-FLATLINE_MIN_SAMPLES = 20
-FLATLINE_MIN_DURATION_MIN = 10
-
-FLATLINE_VALUE_TOLERANCE = {
-    "Irr": 1.0,      # W/m²
-    "T": 0.05,       # °C
-}
-
-FLATLINE_MIN_FRACTION = 0.20
-
-# Minimum array irradiance considered daylight for flatline detection.
-FLATLINE_DAYLIGHT_IRR = 50.0
-
 
 def detect_sensor_flatlining(grid, found, day_label, interval_s):
     """Detect sensors that remain effectively constant during daylight.
@@ -1349,7 +1494,7 @@ def push_to_supabase(confirmed, provisional, client=None):
         return False
 
 
-def run_on_frame(wide, interval_s=None, label="supabase"):
+def run_on_frame(wide, interval_s=None):
     """Detect on an already-loaded wide frame.
 
     Split out from run() so the website can hand in rows pulled from Supabase
@@ -1374,12 +1519,14 @@ def run_on_frame(wide, interval_s=None, label="supabase"):
             if G.CHANNELS.get(fam, {}).get("derived"):
                 continue
             findings += detect_comparison_faults(chunk, found, fam, day_label)
-        findings += detect_low_current(chunk, found, label)
-        findings += detect_diode_faults(chunk, found, label)
-        findings += detect_branch_failure(chunk, found, label)
+        findings += detect_current_flickering(chunk, found, day_label)  
+        findings += detect_low_current(chunk, found, day_label)
+        findings += detect_diode_faults(chunk, found, day_label)
+        findings += detect_branch_failure(chunk, found, day_label)
         findings += detect_asymmetric_bifacial_ratio(chunk,day_label)
         findings += detect_nocturnal_offset(chunk, found, day_label)
         findings += detect_sensor_flatlining(chunk, found, day_label, interval_s)
+        findings += detect_out_of_bounds(chunk, found, day_label)
 
     return require_persistence(findings)
 
@@ -1420,9 +1567,10 @@ def run(data_root=None, out_dir=None, push=False):
         findings += detect_low_current(chunk, found, label)
         findings += detect_diode_faults(chunk, found, label)
         findings += detect_branch_failure(chunk, found, label)
-        findings += detect_asymmetric_bifacial_ratio(chunk,day_label)
-        findings += detect_nocturnal_offset(chunk, found, day_label)
-        findings += detect_sensor_flatlining(chunk, found, day_label, interval_s)
+        findings += detect_asymmetric_bifacial_ratio(chunk, label)
+        findings += detect_nocturnal_offset(chunk, found, label)
+        findings += detect_current_flickering(chunk, found, label)
+        findings += detect_out_of_bounds(chunk, found, label)
 
     confirmed, provisional = require_persistence(findings)
 
