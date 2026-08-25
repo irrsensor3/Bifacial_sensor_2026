@@ -1351,7 +1351,55 @@ def generate_pdf_report(df, report_title, observation, fig, df_dcm=None):
 # =========================
 
 NUM_SENSORS = 24
+def get_sensor_logging_config():
+    """Get logging mode for each sensor.
 
+    Returns:
+        {sensor_id: "normal" | "force_log" | "force_unlog"}
+    """
+    try:
+        res = (
+            supabase.table("sensor_logging_config")
+            .select("sensor_id, logging_mode")
+            .execute()
+        )
+
+        return {
+            int(row["sensor_id"]): row["logging_mode"]
+            for row in (res.data or [])
+        }
+
+    except Exception as e:
+        print(f"WARNING: couldn't fetch sensor logging config: {e}")
+        return {}
+
+
+def set_sensor_logging_mode(sensor_id, logging_mode):
+    """Set one sensor's logging mode."""
+    if logging_mode not in ("normal", "force_log", "force_unlog"):
+        return False
+
+    try:
+        res = (
+            supabase.table("sensor_logging_config")
+            .upsert(
+                {
+                    "sensor_id": int(sensor_id),
+                    "logging_mode": logging_mode,
+                },
+                on_conflict="sensor_id",
+            )
+            .execute()
+        )
+
+        return bool(res.data)
+
+    except Exception as e:
+        print(
+            f"WARNING: couldn't update sensor {sensor_id} "
+            f"logging mode: {e}"
+        )
+        return False
 def get_forced_sensors():
     result = (
         supabase
