@@ -221,7 +221,7 @@ def render_panel_array():
      _render_detail(df_alerts, readings, forced_sensors, excluded_sensors, is_admin)
 
 
-def _render_detail(df_alerts, readings, forced_sensors, is_admin):
+def _render_detail(df_alerts, readings, forced_sensors, excluded_sensors, is_admin):
     selected = st.session_state.selected_sensor
     if selected is None:
         st.info("Select a sensor above to see its readings and logging status.")
