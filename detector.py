@@ -84,6 +84,18 @@ FLICKER_PEER_RATIO_TOLERANCE = 0.08
 
 # Number of abnormal rapid changes required before reporting.
 FLICKER_MIN_EVENTS = 20
+
+#  ASYMMETRIC BIFACIAL RATIO
+
+BIFACIAL_RATIO_MIN_FRONT_IRR = 100.0
+BIFACIAL_RATIO_MIN_SAMPLES = 100
+
+BIFACIAL_RATIO_SIGMA_WARN = 2.5
+BIFACIAL_RATIO_SIGMA_FLAG = 4.0
+
+BIFACIAL_RATIO_MIN_DEVIATION = 10.0   # percent from peer median
+BIFACIAL_RATIO_MIN_FRACTION = 0.20    # fraction of valid daylight samples
+
 # =============================================================================
 #  DATETIME FAULTS
 # =============================================================================
@@ -142,6 +154,228 @@ def detect_datetime_faults(raw_index, interval_s):
                     "count": back, "severity": "high",
                     "detail": f"time moved backwards {back} time(s)"})
     return out
+
+# =============================================================================
+#  ASYMMETRIC BIFACIAL RATIO
+# =============================================================================
+
+def detect_bifacial_ratio_faults(grid, found, day_label):
+    """Detect abnormal rear/front irradiance relationships.
+
+    For bifacial sensors, the useful quantity is the rear-to-front irradiance
+    ratio rather than either irradiance value by itself.
+
+    The ratio is compared against physically comparable bifacial peers at the
+    same instant. This allows the detector to follow changing sunlight,
+    clouds, and ground-reflection conditions without relying on a fixed
+    rear/front ratio.
+
+    A fault is reported when a panel's ratio remains substantially different
+    from its peer group for a meaningful fraction of daylight samples.
+    """
+
+    out = []
+
+    if "Irr" not in found:
+        return out
+
+    irr_cols = found["Irr"]
+
+    if not irr_cols:
+        return out
+
+    # -------------------------------------------------------------------------
+    # Identify front/rear channels.
+    #
+    # This assumes the panel configuration supplied by pv_gapfill.py allows
+    # config_of() / channel naming to distinguish the two faces.
+    # -------------------------------------------------------------------------
+
+    front = {}
+    rear = {}
+
+    for panel, col in irr_cols.items():
+
+        face, _blk, _pos = G.config_of(panel, "Irr")
+
+        face_lower = str(face).lower()
+
+        if face_lower in ("front", "f"):
+            front[panel] = col
+
+        elif face_lower in ("rear", "back", "r"):
+            rear[panel] = col
+
+    # We need actual front/rear pairs.
+    panels = sorted(set(front) & set(rear))
+
+    if len(panels) < 3:
+        return out
+
+    # -------------------------------------------------------------------------
+    # Build irradiance frames.
+    # -------------------------------------------------------------------------
+
+    F = pd.DataFrame({
+        p: pd.to_numeric(grid[front[p]], errors="coerce")
+        for p in panels
+    })
+
+    R = pd.DataFrame({
+        p: pd.to_numeric(grid[rear[p]], errors="coerce")
+        for p in panels
+    })
+
+    # -------------------------------------------------------------------------
+    # Daylight condition.
+    #
+    # Front irradiance must be sufficiently high so that the ratio is not
+    # dominated by division noise around sunrise/sunset.
+    # -------------------------------------------------------------------------
+
+    array_front = F.median(axis=1)
+
+    daylight = array_front >= BIFACIAL_RATIO_MIN_FRONT_IRR
+
+    F = F[daylight]
+    R = R[daylight]
+
+    if len(F) < BIFACIAL_RATIO_MIN_SAMPLES:
+        return out
+
+    # -------------------------------------------------------------------------
+    # Calculate rear/front ratio for every panel.
+    # -------------------------------------------------------------------------
+
+    ratio = R.div(
+        F.replace(0, np.nan)
+    ).replace([np.inf, -np.inf], np.nan)
+
+    # -------------------------------------------------------------------------
+    # Compare each panel with its peers at the same instant.
+    #
+    # This is important because the bifacial ratio can legitimately change
+    # throughout the day.
+    # -------------------------------------------------------------------------
+
+    peer_ratio = ratio.median(axis=1)
+
+    for p in panels:
+
+        r = ratio[p]
+
+        valid = (
+            r.notna()
+            & peer_ratio.notna()
+            & (F[p] >= BIFACIAL_RATIO_MIN_FRONT_IRR)
+        )
+
+        r = r[valid]
+        ref = peer_ratio[valid]
+
+        if len(r) < BIFACIAL_RATIO_MIN_SAMPLES:
+            continue
+
+        # ---------------------------------------------------------------------
+        # Panel ratio relative to peer ratio.
+        #
+        # 1.00 = normal
+        # 0.50 = rear/front ratio is half the peer value
+        # 1.50 = rear/front ratio is 50% higher
+        # ---------------------------------------------------------------------
+
+        relative = (
+            r / ref.replace(0, np.nan)
+        ).replace([np.inf, -np.inf], np.nan).dropna()
+
+        if len(relative) < BIFACIAL_RATIO_MIN_SAMPLES:
+            continue
+
+        # ---------------------------------------------------------------------
+        # Determine the panel's typical deviation from peers.
+        # ---------------------------------------------------------------------
+
+        median_relative = float(relative.median())
+
+        pct_deviation = 100.0 * (median_relative - 1.0)
+
+        # ---------------------------------------------------------------------
+        # Persistence within the day.
+        # ---------------------------------------------------------------------
+
+        abnormal = (
+            (relative < 1.0 - BIFACIAL_RATIO_MIN_DEVIATION / 100.0)
+            |
+            (relative > 1.0 + BIFACIAL_RATIO_MIN_DEVIATION / 100.0)
+        )
+
+        fraction = float(abnormal.mean())
+
+        if fraction < BIFACIAL_RATIO_MIN_FRACTION:
+            continue
+
+        # ---------------------------------------------------------------------
+        # Robust spread of panel-to-peer ratio.
+        # ---------------------------------------------------------------------
+
+        centre = float(np.median(relative))
+
+        mad = float(
+            np.median(
+                np.abs(relative - centre)
+            )
+        )
+
+        spread = mad * 1.4826
+
+        if spread <= 0:
+            spread = float(relative.std())
+
+        if spread <= 0:
+            continue
+
+        # Distance from the normal peer relationship.
+        z = (median_relative - 1.0) / spread
+
+        # ---------------------------------------------------------------------
+        # Require both practical and statistical significance.
+        # ---------------------------------------------------------------------
+
+        if abs(pct_deviation) < BIFACIAL_RATIO_MIN_DEVIATION:
+            continue
+
+        if abs(z) < BIFACIAL_RATIO_SIGMA_WARN:
+            continue
+
+        severity = (
+            "high"
+            if abs(z) >= BIFACIAL_RATIO_SIGMA_FLAG
+            else "medium"
+        )
+
+        out.append({
+            "type": "bifacial_ratio",
+            "family": "Irr",
+            "panel": p,
+            "day": day_label,
+            "median_ratio": round(float(r.median()), 3),
+            "peer_ratio": round(float(ref.median()), 3),
+            "relative_ratio": round(median_relative, 3),
+            "pct_deviation": round(pct_deviation, 1),
+            "fraction_abnormal": round(fraction, 3),
+            "sigma": round(z, 1),
+            "severity": severity,
+            "detail": (
+                f"Irr_{p} rear/front ratio was "
+                f"{median_relative:.2f}× its peer relationship "
+                f"({pct_deviation:+.1f}%) for "
+                f"{100*fraction:.0f}% of valid daylight samples "
+                f"({z:+.1f} sigma)"
+            ),
+        })
+
+    return out
+  
 # =============================================================================
 #  NOCTURNAL OFFSET
 # =============================================================================
@@ -1047,6 +1281,7 @@ def run_on_frame(wide, interval_s=None, label="supabase"):
         findings += detect_current_flickering(chunk, found, day_label)
         findings += detect_diode_faults(chunk, found, day_label)
         findings += detect_branch_failure(chunk, found, day_label)
+        findings += detect_bifacial_ratio_faults(chunk,found,day_label)
         for fam in found:
             if G.CHANNELS.get(fam, {}).get("derived"):
                 continue
@@ -1092,6 +1327,7 @@ def run(data_root=None, out_dir=None, push=False):
         findings += detect_current_flickering(chunk, found, label)
         findings += detect_diode_faults(chunk, found, label)
         findings += detect_branch_failure(chunk, found, label)
+        findings += detect_bifacial_ratio_faults(chunk,found,day_label)
       
         for fam in found:
             if G.CHANNELS.get(fam, {}).get("derived"):
