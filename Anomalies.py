@@ -40,6 +40,9 @@ FAULT_EXPLAIN = {
     "comparison": "Consistently outside the spread of its own peer group.",
     "disconnection": "Both current and voltage gone — the panel is not connected.",
     "datetime": "A problem with the timestamps themselves rather than a reading.",
+    "nocturnal_offset":
+    "The irradiance sensor is reporting meaningful light during a period "
+    "when solar irradiance should be near zero.",
 }
 
 def send_alert_email(subject: str, body: str) -> bool:
