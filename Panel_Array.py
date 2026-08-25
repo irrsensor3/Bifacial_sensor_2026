@@ -218,7 +218,7 @@ def render_panel_array():
     st.caption(caption)
 
     st.divider()
-     _render_detail(df_alerts, readings, forced_sensors, excluded_sensors, is_admin)
+    _render_detail(df_alerts, readings, forced_sensors, excluded_sensors, is_admin)
 
 
 def _render_detail(df_alerts, readings, forced_sensors, excluded_sensors, is_admin):
