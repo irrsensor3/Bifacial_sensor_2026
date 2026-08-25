@@ -26,6 +26,30 @@ SENSOR_LAYOUT = [
     {"row": 3, "position": "Bottom-Left",  "front_a": 13, "panel_sensors": [14, 15, 16, 17], "front_b": 18},
     {"row": 4, "position": "Bottom-Right", "front_a": 19, "panel_sensors": [20, 21, 22, 23], "front_b": 24},
 ]
+# Nearest front reference for each rear sensor.
+# Panels 1 and 2 use the front sensor at the left/end of the row.
+# Panels 3 and 4 use the front sensor at the right/end of the row.
+NEAREST_FRONT_REFERENCE = {
+    2: 1,
+    3: 1,
+    4: 6,
+    5: 6,
+
+    8: 7,
+    9: 7,
+    10: 12,
+    11: 12,
+
+    14: 13,
+    15: 13,
+    16: 18,
+    17: 18,
+
+    20: 19,
+    21: 19,
+    22: 24,
+    23: 24,
+}
 
 # Rear positions 1 and 4 sit at the row ends and see more ground-reflected
 # light than the interior pair. Surfacing that here means the reading you see
