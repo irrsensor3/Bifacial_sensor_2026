@@ -6,10 +6,8 @@ from ui_sections import (
     page_stamp,
     fetch_latest_readings,
     fetch_recent_alerts,
-    get_forced_sensors,
-    set_sensor_force,
-    get_excluded_sensors,
-    set_sensor_exclude,
+    get_sensor_logging_config,
+    set_sensor_logging_mode,
 )
 
 # =========================
