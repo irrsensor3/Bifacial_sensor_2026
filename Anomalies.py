@@ -84,7 +84,6 @@ def send_alert_email(subject: str, body: str) -> bool:
         st.error(f"Failed to send email alert: {e}")
         return False
 
-@st.cache_data(ttl=300, show_spinner=False)
 def fetch_panel_history(days: int, _progress=None) -> pd.DataFrame:
     """Pull recent panel_readings and reshape to the wide layout the detector
     expects.
