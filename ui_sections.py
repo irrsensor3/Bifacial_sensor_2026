@@ -1429,8 +1429,6 @@ def _safe_query(table: str, limit: int, label: str):
         st.warning(f"Couldn't load {label} from the database. Showing nothing for now.")
         return []
 
-
-@st.cache_data(ttl=5)
 def fetch_latest_readings(limit=50):
     rows = _safe_query("sensor_readings", limit, "sensor readings")
     if not rows:
