@@ -73,6 +73,20 @@ FLATLINE_VALUE_TOLERANCE = {
     "T": 0.05,       # °C
 }
 FLATLINE_MIN_FRACTION = 0.20
+
+# =============================================================================
+#  INTERMITTENT CURRENT FLICKERING
+# =============================================================================
+
+FLICKER_MIN_SAMPLES = 200
+FLICKER_MIN_FRACTION = 0.05
+
+# Consecutive-sample change relative to peer current.
+FLICKER_STEP_THRESHOLD = 0.15      # 15%
+FLICKER_PEER_RATIO_TOLERANCE = 0.08
+
+# Number of abnormal rapid changes required before reporting.
+FLICKER_MIN_EVENTS = 20
 # =============================================================================
 #  DATETIME FAULTS
 # =============================================================================
@@ -232,29 +246,73 @@ def detect_nocturnal_offset(grid, found, day_label):
 #  SENSOR FLATLINING
 # =============================================================================
 
+FLATLINE_MIN_SAMPLES = 20
+FLATLINE_MIN_DURATION_MIN = 10
+
+FLATLINE_VALUE_TOLERANCE = {
+    "Irr": 1.0,      # W/m²
+    "T": 0.05,       # °C
+}
+
+FLATLINE_MIN_FRACTION = 0.20
+
+# Minimum array irradiance considered daylight for flatline detection.
+FLATLINE_DAYLIGHT_IRR = 50.0
+
+
 def detect_sensor_flatlining(grid, found, day_label, interval_s):
-    """Detect sensors whose value remains suspiciously constant for too long.
+    """Detect sensors that remain effectively constant during daylight.
 
-    A healthy sensor should normally show at least some variation over time,
-    particularly during daylight. A flatlined sensor can still sit at a
-    perfectly plausible value, so peer comparison alone may not catch it.
+    Nighttime is deliberately excluded. An irradiance sensor remaining near
+    zero at night is normal and must not be interpreted as a flatlined sensor.
 
-    The detector looks for long consecutive runs where the sensor changes by
-    less than a small tolerance. It reports the sensor only when the flatline
-    occupies a meaningful fraction of the day's valid readings.
+    For irradiance sensors, daylight is determined from the median of the
+    available irradiance sensors. This prevents a single faulty sensor from
+    defining whether the array is in daylight.
+
+    Temperature sensors are evaluated only during the same daylight window,
+    but are not required to exceed an irradiance threshold themselves.
     """
+
     out = []
 
     if grid is None or grid.empty:
         return out
 
+    # -------------------------------------------------------------------------
+    # Determine the array-level daylight window.
+    # -------------------------------------------------------------------------
+
+    irr_cols = found.get("Irr", {})
+
+    if irr_cols:
+        irr_frame = pd.DataFrame({
+            p: pd.to_numeric(grid[col], errors="coerce")
+            for p, col in irr_cols.items()
+        })
+
+        array_irr = irr_frame.median(axis=1)
+
+        daylight = array_irr > FLATLINE_DAYLIGHT_IRR
+    else:
+        # Without irradiance channels we cannot reliably determine daylight.
+        # Do not attempt flatline detection rather than guessing from time.
+        return out
+
+    if daylight.sum() < FLATLINE_MIN_SAMPLES:
+        return out
+
+    # -------------------------------------------------------------------------
+    # Examine each physical sensor family.
+    # -------------------------------------------------------------------------
+
     for fam, cols in found.items():
 
-        # Only inspect physical sensor families.
         if G.CHANNELS.get(fam, {}).get("derived"):
             continue
 
         tolerance = FLATLINE_VALUE_TOLERANCE.get(fam)
+
         if tolerance is None:
             continue
 
@@ -262,38 +320,62 @@ def detect_sensor_flatlining(grid, found, day_label, interval_s):
 
             series = pd.to_numeric(
                 grid[col], errors="coerce"
-            ).dropna()
+            )
+
+            # Only evaluate daylight.
+            series = series[daylight].dropna()
 
             if len(series) < MIN_SAMPLES:
                 continue
 
-            # Consecutive samples are considered flat when their change is
-            # smaller than the family-specific tolerance.
+            # -----------------------------------------------------------------
+            # Find consecutive flat runs.
+            #
+            # A sample is considered flat when it changes by no more than the
+            # family-specific tolerance from the previous sample.
+            # -----------------------------------------------------------------
+
             delta = series.diff().abs()
 
             flat = delta <= tolerance
 
-            # A change from NaN/start of series should not start a flatline.
+            # The first sample has no previous sample to compare against.
             flat.iloc[0] = False
 
-            # Find consecutive flat runs.
             groups = (flat != flat.shift()).cumsum()
 
             max_run = 0
             total_flat = 0
+            longest_value = None
 
             for _, run in flat.groupby(groups):
+
                 if not bool(run.iloc[0]):
                     continue
 
                 run_len = len(run)
 
-                if run_len >= FLATLINE_MIN_SAMPLES:
-                    max_run = max(max_run, run_len)
-                    total_flat += run_len
+                if run_len < FLATLINE_MIN_SAMPLES:
+                    continue
+
+                total_flat += run_len
+
+                if run_len > max_run:
+                    max_run = run_len
+
+                    idx = run.index
+
+                    if len(idx):
+                        longest_value = float(
+                            series.loc[idx].median()
+                        )
 
             if max_run < FLATLINE_MIN_SAMPLES:
                 continue
+
+            # -----------------------------------------------------------------
+            # Convert the longest run to real time.
+            # -----------------------------------------------------------------
 
             duration_min = (
                 max_run * float(interval_s) / 60.0
@@ -307,23 +389,9 @@ def detect_sensor_flatlining(grid, found, day_label, interval_s):
             if flat_fraction < FLATLINE_MIN_FRACTION:
                 continue
 
-            # Use the longest flat segment as the primary evidence.
-            longest_value = None
-
-            delta = series.diff().abs()
-            flat = delta <= tolerance
-            flat.iloc[0] = False
-            groups = (flat != flat.shift()).cumsum()
-
-            for _, run in flat.groupby(groups):
-                if not bool(run.iloc[0]):
-                    continue
-
-                if len(run) == max_run:
-                    idx = run.index
-                    if len(idx):
-                        longest_value = float(series.loc[idx].median())
-                    break
+            # -----------------------------------------------------------------
+            # Severity.
+            # -----------------------------------------------------------------
 
             severity = (
                 "high"
@@ -338,14 +406,18 @@ def detect_sensor_flatlining(grid, found, day_label, interval_s):
                 "day": day_label,
                 "duration_minutes": round(duration_min, 1),
                 "flat_fraction": round(flat_fraction, 3),
-                "value": round(longest_value, 3)
-                    if longest_value is not None else None,
+                "value": (
+                    round(longest_value, 3)
+                    if longest_value is not None
+                    else None
+                ),
                 "tolerance": tolerance,
                 "severity": severity,
                 "detail": (
                     f"{fam}_{panel} remained effectively constant at "
-                    f"{longest_value:.3g} for about {duration_min:.0f} min "
-                    f"({100*flat_fraction:.0f}% of valid readings)"
+                    f"{longest_value:.3g} for about "
+                    f"{duration_min:.0f} min during daylight "
+                    f"({100 * flat_fraction:.0f}% of valid daylight readings)"
                 ),
             })
 
