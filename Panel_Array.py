@@ -227,12 +227,12 @@ def render_panel_array():
         "than panels 2 and 3."
     )
     if is_admin:
-    caption = (
-            "Bar length is irradiance relative to the highest reading in the "
-            "array. Admins can change each sensor's logging mode between "
-            "Normal, Force Log, and Force Unlog. Panels 1 and 4 sit at the "
-            "row ends and see more ground-reflected light than panels 2 and 3."
-        )
+        caption = (
+                "Bar length is irradiance relative to the highest reading in the "
+                "array. Admins can change each sensor's logging mode between "
+                "Normal, Force Log, and Force Unlog. Panels 1 and 4 sit at the "
+                "row ends and see more ground-reflected light than panels 2 and 3."
+            )
     st.caption(caption)
 
     st.divider()
