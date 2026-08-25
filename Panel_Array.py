@@ -123,10 +123,13 @@ def render_panel_array():
 
     df_live = fetch_latest_readings(limit=1)
     df_alerts = fetch_recent_alerts()
-    # Force-log state is admin-only, end to end — guests never fetch it, so
-    # there's nothing forced_sensors-shaped for a guest session to leak.
-    forced_sensors = set(get_forced_sensors() or []) if is_admin else set()
-    excluded_sensors = set(get_excluded_sensors() or []) if is_admin else set()
+    # Logging configuration is admin-only.
+    # Normal users do not need to fetch the configuration.
+    logging_config = (
+        get_sensor_logging_config()
+        if is_admin
+        else {}
+    )
 
     if "selected_sensor" not in st.session_state:
         st.session_state.selected_sensor = None
@@ -144,11 +147,28 @@ def render_panel_array():
         force-logging is spelled out in the label so it survives greyscale,
         colour blindness and a screen reader. Force state only ever appears
         for admins; guests get the reading with no mention of the concept."""
-        forced = is_admin and sensor_id in forced_sensors
-        excluded = is_admin and sensor_id in excluded_sensors
+        logging_mode = (
+            logging_config.get(sensor_id, "normal")
+            if is_admin
+            else "normal"
+        )
+        
         selected = st.session_state.selected_sensor == sensor_id
-        state_txt = "forced" if forced else ("excluded" if excluded else "")
-        marks = " ".join(x for x in (("[*]" if selected else ""), state_txt) if x)
+        
+        if is_admin:
+            state_txt = {
+                "normal": "",
+                "force_log": "force log",
+                "force_unlog": "force unlog",
+            }.get(logging_mode, "")
+        
+            marks = " ".join(
+                x for x in (("[*]" if selected else ""), state_txt)
+                if x
+            )
+        else:
+            marks = "[*]" if selected else ""
+        
         caption = f"{label}{(' · ' + marks) if marks else ''}"
         
 
@@ -207,19 +227,19 @@ def render_panel_array():
         "than panels 2 and 3."
     )
     if is_admin:
-        caption = (
+    caption = (
             "Bar length is irradiance relative to the highest reading in the "
-            "array. “forced” means the sensor keeps logging below 0 °C; the "
-            "rest use the normal cutoff. Panels 1 and 4 sit at the row ends "
-            "and see more ground-reflected light than panels 2 and 3."
+            "array. Admins can change each sensor's logging mode between "
+            "Normal, Force Log, and Force Unlog. Panels 1 and 4 sit at the "
+            "row ends and see more ground-reflected light than panels 2 and 3."
         )
     st.caption(caption)
 
     st.divider()
-    _render_detail(df_alerts, readings, forced_sensors, excluded_sensors, is_admin)
+    _render_detail(df_alerts, readings, logging_config, is_admin)
 
 
-def _render_detail(df_alerts, readings, forced_sensors, excluded_sensors, is_admin):
+def _render_detail(df_alerts, readings, logging_config, is_admin):
     selected = st.session_state.selected_sensor
     if selected is None:
         st.info("Select a sensor above to see its readings and logging status.")
@@ -256,19 +276,39 @@ def _render_detail(df_alerts, readings, forced_sensors, excluded_sensors, is_adm
     )
 
     if is_admin:
-        forced = selected in forced_sensors
-        excluded = selected in excluded_sensors
-        state_label = "Forced on" if forced else ("Force-excluded" if excluded else "Normal cutoff")
-        cols[2].metric("Below-zero logging", state_label)
-
-        c1, c2 = st.columns(2)
-        with c1:
-            action = "Stop forcing" if forced else "Force logging below 0 °C"
-            if st.button(action, key=f"panel_array_toggle_force_{selected}", use_container_width=True):
-                if set_sensor_force(selected, not forced):
-                    st.rerun()
-                else:
-                    st.error(f"Sensor {selected} was not updated — the write did not go through.")
+        current_mode = logging_config.get(selected, "normal")
+    
+        mode_labels = {
+            "normal": "Normal",
+            "force_log": "Force Log",
+            "force_unlog": "Force Unlog",
+        }
+    
+        cols[2].metric(
+            "Logging mode",
+            mode_labels.get(current_mode, "Normal")
+        )
+    
+        new_mode = st.selectbox(
+            "Logging mode",
+            options=["normal", "force_log", "force_unlog"],
+            format_func=lambda x: mode_labels[x],
+            index=["normal", "force_log", "force_unlog"].index(current_mode),
+            key=f"panel_array_logging_mode_{selected}",
+        )
+    
+        if new_mode != current_mode:
+            if set_sensor_logging_mode(selected, new_mode):
+                st.success(
+                    f"Sensor {selected} set to "
+                    f"{mode_labels[new_mode]}."
+                )
+                st.rerun()
+            else:
+                st.error(
+                    f"Sensor {selected} was not updated — "
+                    "the write did not go through."
+                )
         with c2:
             action2 = "Stop excluding" if excluded else "Force unlogging"
             if st.button(action2, key=f"panel_array_toggle_exclude_{selected}", use_container_width=True):
