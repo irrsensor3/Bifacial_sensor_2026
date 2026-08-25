@@ -1400,64 +1400,35 @@ def set_sensor_logging_mode(sensor_id, logging_mode):
             f"logging mode: {e}"
         )
         return False
+        
 def get_forced_sensors():
-    result = (
-        supabase
-        .table("sensor_logging_config")
-        .select("sensor_id")
-        .eq("logging_mode", "force_log")
-        .execute()
-    )
-    return [row["sensor_id"] for row in (result.data or [])]
-
-
-def set_sensor_force(sensor_id: int, forced: bool) -> bool:
     try:
-        mode = "force_log" if forced else "normal"
-
-        supabase.table("sensor_logging_config").upsert({
-            "sensor_id": sensor_id,
-            "logging_mode": mode,
-            "updated_at": datetime.now(SITE_ZONE).isoformat(),
-        }).execute()
-
-        # If force logging is enabled, make sure force-unlog is removed.
-        return True
-
-    except Exception:
-        return False
-
-def get_excluded_sensors():
-    result = (
-        supabase
-        .table("sensor_logging_config")
-        .select("sensor_id")
-        .eq("logging_mode", "force_unlog")
-        .execute()
-    )
-
-    return [row["sensor_id"] for row in (result.data or [])]
-
-
-def set_sensor_exclude(sensor_id: int, excluded: bool) -> bool:
-    try:
-        mode = "force_unlog" if excluded else "normal"
-
         result = (
             supabase
             .table("sensor_logging_config")
-            .upsert({
-                "sensor_id": sensor_id,
-                "logging_mode": mode,
-                "updated_at": datetime.now(SITE_ZONE).isoformat(),
-            })
+            .select("sensor_id")
+            .eq("logging_mode", "force_log")
             .execute()
         )
+        return [int(row["sensor_id"]) for row in (result.data or [])]
+    except Exception as e:
+        print(f"WARNING: couldn't fetch forced sensors: {e}")
+        return []
 
-        return bool(result.data)
 
-    except Exception:
-        return False
+def get_excluded_sensors():
+    try:
+        result = (
+            supabase
+            .table("sensor_logging_config")
+            .select("sensor_id")
+            .eq("logging_mode", "force_unlog")
+            .execute()
+        )
+        return [int(row["sensor_id"]) for row in (result.data or [])]
+    except Exception as e:
+        print(f"WARNING: couldn't fetch excluded sensors: {e}")
+        return []
 
 def _safe_query(table: str, limit: int, label: str):
     """Run a Supabase read and surface failures as a message rather than a
