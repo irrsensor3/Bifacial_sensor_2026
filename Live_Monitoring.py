@@ -88,8 +88,7 @@ def _load_range(period_files, download_fn, build_created_at, start_date, end_dat
         ].copy()
     
         df_hist["created_at"] = ca.loc[df_hist.index]
-    
-        df_hist["created_at"] = ca
+        
     return df_hist
 
 
