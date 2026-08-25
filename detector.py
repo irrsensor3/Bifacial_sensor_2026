@@ -139,60 +139,130 @@ BIFACIAL_ROWS = {
 # =============================================================================
 
 def detect_datetime_faults(raw_index, interval_s):
-    """Problems with time itself, before any measurement is considered.
-
-    Mechanical, no model involved. Every one of these was found in the real
-    logger output at some point: torn writes, duplicate stamps, impossible
-    dates, and whole missing stretches.
-    """
     out = []
-    idx = pd.DatetimeIndex(raw_index).sort_values()
-    if len(idx) < 3:
+
+    original_idx = pd.DatetimeIndex(raw_index)
+
+    if len(original_idx) < 3:
         return out
 
-    dup = int(pd.Series(idx).duplicated().sum())
+    # -------------------------------------------------------------
+    # Duplicate timestamps
+    # -------------------------------------------------------------
+
+    dup = int(
+        pd.Series(original_idx).duplicated().sum()
+    )
+
     if dup:
-        out.append({"type": "datetime", "subtype": "duplicate_timestamps",
-                    "count": dup, "severity": "low",
-                    "detail": f"{dup:,} rows share a timestamp with another row"})
+        out.append({
+            "type": "datetime",
+            "subtype": "duplicate_timestamps",
+            "count": dup,
+            "severity": "low",
+            "detail": (
+                f"{dup:,} rows share a timestamp with another row"
+            )
+        })
 
-    bad = int(((idx < pd.Timestamp("2000-01-01")) |
-               (idx > pd.Timestamp.now() + pd.Timedelta(days=1))).sum())
+    # -------------------------------------------------------------
+    # Impossible timestamps
+    # -------------------------------------------------------------
+
+    bad = int(
+        (
+            (original_idx < pd.Timestamp("2000-01-01")) |
+            (original_idx > pd.Timestamp.now() + pd.Timedelta(days=1))
+        ).sum()
+    )
+
     if bad:
-        out.append({"type": "datetime", "subtype": "impossible_timestamp",
-                    "count": bad, "severity": "high",
-                    "detail": f"{bad:,} rows dated outside any plausible range"})
+        out.append({
+            "type": "datetime",
+            "subtype": "impossible_timestamp",
+            "count": bad,
+            "severity": "high",
+            "detail": (
+                f"{bad:,} rows dated outside any plausible range"
+            )
+        })
 
-    step = pd.Series(idx).diff().dt.total_seconds().dropna()
+    # -------------------------------------------------------------
+    # Check backwards movement BEFORE sorting
+    # -------------------------------------------------------------
 
-    # Compare each gap against the LOCAL cadence, not one global figure.
-    #
-    # A logger whose rate changes -- yours went from 60 s to about 11 s -- has
-    # no single interval. Measured against a global one, every sample from the
-    # slower stretch looks like a missing sample: 2,903 false gaps out of 9,556
-    # readings, where the database itself reports 10.
-    #
-    # A rolling median tracks the rate as it changes, so only a genuine pause
-    # stands out from its own neighbourhood.
-    local = step.rolling(101, center=True, min_periods=15).median()
-    local = local.fillna(step.median()).clip(lower=1.0)
-    gaps = step[step > local * 3]
-    if len(gaps):
-        out.append({"type": "datetime", "subtype": "missing_samples",
-                    "count": int(len(gaps)),
-                    "minutes_lost": round(float(gaps.sum() / 60), 1),
-                    "severity": "high" if gaps.sum() > 3600 else "medium",
-                    "detail": f"{len(gaps)} gap(s), {gaps.sum()/60:.0f} min of "
-                              f"missing samples"})
+    original_step = (
+        pd.Series(original_idx)
+        .diff()
+        .dt.total_seconds()
+        .dropna()
+    )
 
-    # Clock stepping backwards mid-file: the logger restarted or NTP corrected.
-    back = int((step < 0).sum())
+    back = int((original_step < 0).sum())
+
     if back:
-        out.append({"type": "datetime", "subtype": "time_went_backwards",
-                    "count": back, "severity": "high",
-                    "detail": f"time moved backwards {back} time(s)"})
-    return out
+        out.append({
+            "type": "datetime",
+            "subtype": "time_went_backwards",
+            "count": back,
+            "severity": "high",
+            "detail": (
+                f"time moved backwards {back} time(s)"
+            )
+        })
 
+    # -------------------------------------------------------------
+    # Sort only for missing-gap analysis
+    # -------------------------------------------------------------
+
+    idx = original_idx.sort_values()
+
+    step = (
+        pd.Series(idx)
+        .diff()
+        .dt.total_seconds()
+        .dropna()
+    )
+
+    local = (
+        step
+        .rolling(
+            101,
+            center=True,
+            min_periods=15
+        )
+        .median()
+    )
+
+    local = (
+        local
+        .fillna(step.median())
+        .clip(lower=1.0)
+    )
+
+    gaps = step[step > local * 3]
+
+    if len(gaps):
+        out.append({
+            "type": "datetime",
+            "subtype": "missing_samples",
+            "count": int(len(gaps)),
+            "minutes_lost": round(
+                float(gaps.sum() / 60),
+                1
+            ),
+            "severity": (
+                "high"
+                if gaps.sum() > 3600
+                else "medium"
+            ),
+            "detail": (
+                f"{len(gaps)} gap(s), "
+                f"{gaps.sum()/60:.0f} min of missing samples"
+            )
+        })
+
+    return out
 # =============================================================================
 #  ASYMMETRIC BIFACIAL RATIO
 # =============================================================================
@@ -632,7 +702,7 @@ def detect_sensor_flatlining(grid, found, day_label, interval_s):
             # -----------------------------------------------------------------
 
             duration_min = (
-                max_run * float(interval_s) / 60.0
+                max(0, max_run - 1) * float(interval_s) / 60.0
             )
 
             if duration_min < FLATLINE_MIN_DURATION_MIN:
@@ -1300,19 +1370,16 @@ def run_on_frame(wide, interval_s=None, label="supabase"):
         day_label = str(day.date())
         if len(chunk) < MIN_SAMPLES:
             continue
-        findings += detect_low_current(chunk, found, day_label)
-        findings += detect_current_flickering(chunk, found, day_label)
-        findings += detect_diode_faults(chunk, found, day_label)
-        findings += detect_branch_failure(chunk, found, day_label)
-        findings += detect_bifacial_ratio_faults(chunk,found,day_label)
-        findings += detect_asymmetric_bifacial_ratio(chunk,day_label)
         for fam in found:
             if G.CHANNELS.get(fam, {}).get("derived"):
                 continue
             findings += detect_comparison_faults(chunk, found, fam, day_label)
-        findings += detect_low_current(chunk, found, day_label)
-        findings += detect_diode_faults(chunk, found, day_label)
-        findings += detect_branch_failure(chunk, found, day_label)
+        findings += detect_low_current(chunk, found, label)
+        findings += detect_diode_faults(chunk, found, label)
+        findings += detect_branch_failure(chunk, found, label)
+        findings += detect_asymmetric_bifacial_ratio(chunk,day_label)
+        findings += detect_nocturnal_offset(chunk, found, day_label)
+        findings += detect_sensor_flatlining(chunk, found, day_label, interval_s)
 
     return require_persistence(findings)
 
@@ -1346,14 +1413,6 @@ def run(data_root=None, out_dir=None, push=False):
     
         if len(chunk) < MIN_SAMPLES:
             continue
-    
-        findings += detect_low_current(chunk, found, label)
-        findings += detect_current_flickering(chunk, found, label)
-        findings += detect_diode_faults(chunk, found, label)
-        findings += detect_branch_failure(chunk, found, label)
-        findings += detect_bifacial_ratio_faults(chunk,found,day_label)
-        findings += detect_asymmetric_bifacial_ratio(chunk,day_label)
-      
         for fam in found:
             if G.CHANNELS.get(fam, {}).get("derived"):
                 continue   # derived channels inherit their inputs' faults
@@ -1361,6 +1420,9 @@ def run(data_root=None, out_dir=None, push=False):
         findings += detect_low_current(chunk, found, label)
         findings += detect_diode_faults(chunk, found, label)
         findings += detect_branch_failure(chunk, found, label)
+        findings += detect_asymmetric_bifacial_ratio(chunk,day_label)
+        findings += detect_nocturnal_offset(chunk, found, day_label)
+        findings += detect_sensor_flatlining(chunk, found, day_label, interval_s)
 
     confirmed, provisional = require_persistence(findings)
 
