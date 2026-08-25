@@ -256,12 +256,9 @@ def _render_detail(df_alerts, readings, forced_sensors, is_admin):
 
     if is_admin:
         forced = selected in forced_sensors
-        cols[2].metric("Below-zero logging", "Forced on" if forced else "Normal cutoff")
-
-        action = "Stop forcing" if forced else "Force logging below 0 °C"
+        action = "Unforce below-0°C logging" if forced else "Force below-0°C logging"
         if st.button(action, key=f"panel_array_toggle_force_{selected}"):
             if set_sensor_force(selected, not forced):
                 st.rerun()
             else:
-                st.error(
-                    f"Sensor {selected} was not
+                st.error(f"Sensor {selected} was not updated.")
