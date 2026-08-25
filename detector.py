@@ -658,18 +658,6 @@ def run_on_frame(wide, interval_s=None, label="supabase"):
 
     for day, chunk in grid.groupby(grid.index.normalize()):
         day_label = str(day.date())
-    
-        if len(chunk) < MIN_SAMPLES:
-            continue
-    
-        findings += detect_nocturnal_offset(
-            chunk,
-            found,
-            day_label
-        )
-
-    for day, chunk in grid.groupby(grid.index.normalize()):
-        day_label = str(day.date())
         if len(chunk) < MIN_SAMPLES:
             continue
         findings += detect_nocturnal_offset(
