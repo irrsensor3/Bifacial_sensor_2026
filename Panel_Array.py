@@ -108,9 +108,11 @@ def _last_subzero_alert(df_alerts: pd.DataFrame, sensor_id: int):
 
 
 def render_panel_array():
-    require_login()
+    require_login()  # no role= — guests reach this page same as admins
     page_stamp("Panel Array")
     st.markdown(_PANEL_CSS, unsafe_allow_html=True)
+
+    is_admin = st.session_state.get("user_role") == "admin"
 
     st.title("Panel array")
     st.caption(
@@ -121,7 +123,9 @@ def render_panel_array():
 
     df_live = fetch_latest_readings(limit=1)
     df_alerts = fetch_recent_alerts()
-    forced_sensors = set(get_forced_sensors() or [])
+    # Force-log state is admin-only, end to end — guests never fetch it, so
+    # there's nothing forced_sensors-shaped for a guest session to leak.
+    forced_sensors = set(get_forced_sensors() or []) if is_admin else set()
 
     if "selected_sensor" not in st.session_state:
         st.session_state.selected_sensor = None
@@ -137,8 +141,9 @@ def render_panel_array():
     def sensor_tile(sensor_id: int, label: str, face: str, edge: bool = False):
         """One sensor: a button plus its reading. Never colour alone --
         force-logging is spelled out in the label so it survives greyscale,
-        colour blindness and a screen reader."""
-        forced = sensor_id in forced_sensors
+        colour blindness and a screen reader. Force state only ever appears
+        for admins; guests get the reading with no mention of the concept."""
+        forced = is_admin and sensor_id in forced_sensors
         selected = st.session_state.selected_sensor == sensor_id
         state_txt = "forced" if forced else ""
         marks = " ".join(x for x in (("[*]" if selected else ""), state_txt) if x)
@@ -193,18 +198,25 @@ def render_panel_array():
                 with slots[5]:
                     sensor_tile(cfg["front_b"], "Front B", "front")
 
-    st.caption(
+    caption = (
         "Bar length is irradiance relative to the highest reading in the array. "
-        "“forced” means the sensor keeps logging below 0 °C; the rest use the "
-        "normal cutoff. Panels 1 and 4 sit at the row ends and see more "
-        "ground-reflected light than panels 2 and 3."
+        "Panels 1 and 4 sit at the row ends and see more ground-reflected light "
+        "than panels 2 and 3."
     )
+    if is_admin:
+        caption = (
+            "Bar length is irradiance relative to the highest reading in the "
+            "array. “forced” means the sensor keeps logging below 0 °C; the "
+            "rest use the normal cutoff. Panels 1 and 4 sit at the row ends "
+            "and see more ground-reflected light than panels 2 and 3."
+        )
+    st.caption(caption)
 
     st.divider()
-    _render_detail(df_alerts, readings, forced_sensors)
+    _render_detail(df_alerts, readings, forced_sensors, is_admin)
 
 
-def _render_detail(df_alerts, readings, forced_sensors):
+def _render_detail(df_alerts, readings, forced_sensors, is_admin):
     selected = st.session_state.selected_sensor
     if selected is None:
         st.info("Select a sensor above to see its readings and logging status.")
@@ -231,26 +243,25 @@ def _render_detail(df_alerts, readings, forced_sensors):
 
     irr_val = readings.get(selected)
     alert = _last_subzero_alert(df_alerts, selected)
-    forced = selected in forced_sensors
 
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Irradiance", f"{irr_val:,.1f} W/m²" if irr_val is not None else "No reading")
-    c2.metric(
+    # Sub-zero alert history is informational and stays visible to everyone.
+    # Only the force-log control (state + toggle) is admin-only.
+    cols = st.columns(3) if is_admin else st.columns(2)
+    cols[0].metric("Irradiance", f"{irr_val:,.1f} W/m²" if irr_val is not None else "No reading")
+    cols[1].metric(
         "Last sub-zero reading",
         f"{alert[0]} °C" if alert else "None logged",
         help=f"Recorded {alert[1]}" if alert else "This sensor has never tripped the 0 °C threshold.",
     )
-    c3.metric("Below-zero logging", "Forced on" if forced else "Normal cutoff")
 
-    if st.session_state.get("user_role") == "admin":
+    if is_admin:
+        forced = selected in forced_sensors
+        cols[2].metric("Below-zero logging", "Forced on" if forced else "Normal cutoff")
+
         action = "Stop forcing" if forced else "Force logging below 0 °C"
         if st.button(action, key=f"panel_array_toggle_force_{selected}"):
             if set_sensor_force(selected, not forced):
                 st.rerun()
             else:
                 st.error(
-                    f"Sensor {selected} was not updated — the Supabase write "
-                    f"did not go through. Check the connection and try again."
-                )
-    else:
-        st.caption("Only admins can change below-zero logging.")
+                    f"Sensor {selected} was not
