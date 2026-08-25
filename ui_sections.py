@@ -1384,10 +1384,6 @@ def get_forced_sensors() -> set:
 
 
 def set_sensor_force(sensor_id: int, forced: bool) -> bool:
-    """Best-effort toggle of a single sensor's force-log override.
-    Reads the current array, adds/removes sensor_id, writes the full
-    array back. Returns True on success so the caller can show an
-    error if it didn't actually go through."""
     try:
         current = get_forced_sensors()
         if forced:
@@ -1397,11 +1393,56 @@ def set_sensor_force(sensor_id: int, forced: bool) -> bool:
         supabase.table("pi_settings").update(
             {"force_log_sensors": sorted(current)}
         ).eq("id", 1).execute()
-        _forced_sensors_cached.clear()   # so the UI reflects the toggle at once
+        _forced_sensors_cached.clear()
+        if forced and sensor_id in get_excluded_sensors():
+            set_sensor_exclude(sensor_id, False)
         return True
     except Exception:
         return False
+        
+@st.cache_data(ttl=3)
+def _excluded_sensors_cached() -> frozenset:
+    try:
+        res = (
+            supabase.table("pi_settings")
+            .select("force_exclude_sensors")
+            .eq("id", 1)
+            .execute()
+        )
+        if res.data:
+            return frozenset(int(s) for s in (res.data[0].get("force_exclude_sensors") or []))
+    except Exception:
+        pass
+    return frozenset()
 
+
+def get_excluded_sensors() -> set:
+    """Best-effort read of which sensor IDs are force-excluded — discarded
+    even when the reading would otherwise pass the normal 0°C cutoff.
+    Mutually exclusive with force-logging: a sensor is forced on, forced
+    off, or on the normal cutoff — never two at once."""
+    return set(_excluded_sensors_cached())
+
+
+def set_sensor_exclude(sensor_id: int, excluded: bool) -> bool:
+    """Toggle a sensor's force-exclude override. Turning this on clears any
+    force-log override on the same sensor — the Pi can't be told to both
+    always keep and always discard the same reading."""
+    try:
+        current = get_excluded_sensors()
+        if excluded:
+            current.add(sensor_id)
+        else:
+            current.discard(sensor_id)
+        supabase.table("pi_settings").update(
+            {"force_exclude_sensors": sorted(current)}
+        ).eq("id", 1).execute()
+        _excluded_sensors_cached.clear()
+        if excluded and sensor_id in get_forced_sensors():
+            set_sensor_force(sensor_id, False)
+        return True
+    except Exception:
+        return False
 
 def _safe_query(table: str, limit: int, label: str):
     """Run a Supabase read and surface failures as a message rather than a
