@@ -288,10 +288,15 @@ def _render_detail(df_alerts, readings, logging_config, is_admin):
         where += " · front reference"
 
     elif pos:
+        front_reference = NEAREST_FRONT_REFERENCE.get(selected)
+    
         where += (
             f" · panel {pos}"
             + (" (row end)" if pos in EDGE_POSITIONS else " (interior)")
         )
+    
+        if front_reference is not None:
+            where += f" · front reference: Sensor {front_reference}"
 
     st.subheader(f"Sensor {selected}")
     st.caption(where)
