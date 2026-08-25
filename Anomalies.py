@@ -225,7 +225,6 @@ def _render_findings(records, empty_message):
 
 def render_anomalies():
     require_login()
-    st.write("Loaded Streamlit secret keys:", list(st.secrets.keys()))
     page_stamp("Anomalies")
     st.title("Anomaly detection")
     st.caption(
