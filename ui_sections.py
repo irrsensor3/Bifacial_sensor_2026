@@ -1352,23 +1352,6 @@ def generate_pdf_report(df, report_title, observation, fig, df_dcm=None):
 
 NUM_SENSORS = 24
 
-
-@st.cache_data(ttl=3)
-def _forced_sensors_cached() -> frozenset:
-    try:
-        res = (
-            supabase.table("pi_settings")
-            .select("force_log_sensors")
-            .eq("id", 1)
-            .execute()
-        )
-        if res.data:
-            return frozenset(int(s) for s in (res.data[0].get("force_log_sensors") or []))
-    except Exception:
-        pass
-    return frozenset()
-
-
 def get_forced_sensors():
     result = (
         supabase
@@ -1382,36 +1365,19 @@ def get_forced_sensors():
 
 def set_sensor_force(sensor_id: int, forced: bool) -> bool:
     try:
-        current = get_forced_sensors()
-        if forced:
-            current.add(sensor_id)
-        else:
-            current.discard(sensor_id)
-        supabase.table("pi_settings").update(
-            {"force_log_sensors": sorted(current)}
-        ).eq("id", 1).execute()
-        _forced_sensors_cached.clear()
-        if forced and sensor_id in get_excluded_sensors():
-            set_sensor_exclude(sensor_id, False)
+        mode = "force_log" if forced else "normal"
+
+        supabase.table("sensor_logging_config").upsert({
+            "sensor_id": sensor_id,
+            "logging_mode": mode,
+            "updated_at": datetime.now(SITE_ZONE).isoformat(),
+        }).execute()
+
+        # If force logging is enabled, make sure force-unlog is removed.
         return True
+
     except Exception:
         return False
-        
-@st.cache_data(ttl=3)
-def _excluded_sensors_cached() -> frozenset:
-    try:
-        res = (
-            supabase.table("pi_settings")
-            .select("force_exclude_sensors")
-            .eq("id", 1)
-            .execute()
-        )
-        if res.data:
-            return frozenset(int(s) for s in (res.data[0].get("force_exclude_sensors") or []))
-    except Exception:
-        pass
-    return frozenset()
-
 
 def get_excluded_sensors():
     result = (
@@ -1425,21 +1391,25 @@ def get_excluded_sensors():
     return [row["sensor_id"] for row in (result.data or [])]
 
 
-def set_sensor_exclude(sensor_id, excluded):
-    mode = "force_unlog" if excluded else "normal"
+def set_sensor_exclude(sensor_id: int, excluded: bool) -> bool:
+    try:
+        mode = "force_unlog" if excluded else "normal"
 
-    result = (
-        supabase
-        .table("sensor_logging_config")
-        .upsert({
-            "sensor_id": sensor_id,
-            "logging_mode": mode,
-            "updated_at": "now()",
-        })
-        .execute()
-    )
+        result = (
+            supabase
+            .table("sensor_logging_config")
+            .upsert({
+                "sensor_id": sensor_id,
+                "logging_mode": mode,
+                "updated_at": datetime.now(SITE_ZONE).isoformat(),
+            })
+            .execute()
+        )
 
-    return bool(result.data)
+        return bool(result.data)
+
+    except Exception:
+        return False
 
 def _safe_query(table: str, limit: int, label: str):
     """Run a Supabase read and surface failures as a message rather than a
