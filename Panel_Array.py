@@ -128,6 +128,7 @@ def render_panel_array():
     # Force-log state is admin-only, end to end — guests never fetch it, so
     # there's nothing forced_sensors-shaped for a guest session to leak.
     forced_sensors = set(get_forced_sensors() or []) if is_admin else set()
+    excluded_sensors = set(get_excluded_sensors() or []) if is_admin else set()
 
     if "selected_sensor" not in st.session_state:
         st.session_state.selected_sensor = None
@@ -146,10 +147,12 @@ def render_panel_array():
         colour blindness and a screen reader. Force state only ever appears
         for admins; guests get the reading with no mention of the concept."""
         forced = is_admin and sensor_id in forced_sensors
+        excluded = is_admin and sensor_id in excluded_sensors
         selected = st.session_state.selected_sensor == sensor_id
-        state_txt = "forced" if forced else ""
+        state_txt = "forced" if forced else ("excluded" if excluded else "")
         marks = " ".join(x for x in (("[*]" if selected else ""), state_txt) if x)
         caption = f"{label}{(' · ' + marks) if marks else ''}"
+        
 
         # primary = front reference, secondary = rear. Shape/weight, not hue.
         if st.button(
@@ -215,7 +218,7 @@ def render_panel_array():
     st.caption(caption)
 
     st.divider()
-    _render_detail(df_alerts, readings, forced_sensors, is_admin)
+     _render_detail(df_alerts, readings, forced_sensors, excluded_sensors, is_admin)
 
 
 def _render_detail(df_alerts, readings, forced_sensors, is_admin):
@@ -246,8 +249,6 @@ def _render_detail(df_alerts, readings, forced_sensors, is_admin):
     irr_val = readings.get(selected)
     alert = _last_subzero_alert(df_alerts, selected)
 
-    # Sub-zero alert history is informational and stays visible to everyone.
-    # Only the force-log control (state + toggle) is admin-only.
     cols = st.columns(3) if is_admin else st.columns(2)
     cols[0].metric("Irradiance", f"{irr_val:,.1f} W/m²" if irr_val is not None else "No reading")
     cols[1].metric(
@@ -258,9 +259,22 @@ def _render_detail(df_alerts, readings, forced_sensors, is_admin):
 
     if is_admin:
         forced = selected in forced_sensors
-        action = "Unforce below-0°C logging" if forced else "Force below-0°C logging"
-        if st.button(action, key=f"panel_array_toggle_force_{selected}"):
-            if set_sensor_force(selected, not forced):
-                st.rerun()
-            else:
-                st.error(f"Sensor {selected} was not updated.")
+        excluded = selected in excluded_sensors
+        state_label = "Forced on" if forced else ("Force-excluded" if excluded else "Normal cutoff")
+        cols[2].metric("Below-zero logging", state_label)
+
+        c1, c2 = st.columns(2)
+        with c1:
+            action = "Stop forcing" if forced else "Force logging below 0 °C"
+            if st.button(action, key=f"panel_array_toggle_force_{selected}", use_container_width=True):
+                if set_sensor_force(selected, not forced):
+                    st.rerun()
+                else:
+                    st.error(f"Sensor {selected} was not updated — the write did not go through.")
+        with c2:
+            action2 = "Stop excluding" if excluded else "Force unlogging"
+            if st.button(action2, key=f"panel_array_toggle_exclude_{selected}", use_container_width=True):
+                if set_sensor_exclude(selected, not excluded):
+                    st.rerun()
+                else:
+                    st.error(f"Sensor {selected} was not updated — the write did not go through.")
