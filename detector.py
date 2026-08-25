@@ -74,10 +74,7 @@ FLATLINE_VALUE_TOLERANCE = {
 }
 FLATLINE_MIN_FRACTION = 0.20
 
-# =============================================================================
 #  INTERMITTENT CURRENT FLICKERING
-# =============================================================================
-
 FLICKER_MIN_SAMPLES = 200
 FLICKER_MIN_FRACTION = 0.05
 
@@ -422,7 +419,190 @@ def detect_sensor_flatlining(grid, found, day_label, interval_s):
             })
 
     return out
+# =============================================================================
+#  INTERMITTENT CURRENT FLICKERING
+# =============================================================================
 
+def detect_current_flickering(grid, found, day_label):
+    """Detect rapid, repeated current fluctuations unique to one panel.
+
+    The detector compares each panel's current against the peer median at the
+    same instant. This removes common irradiance changes such as clouds.
+
+    A flickering fault is characterised by repeated rapid changes in the
+    panel/peer current ratio while the peer group itself remains relatively
+    stable.
+
+    This is different from low_current:
+        low_current          -> persistently low output
+        current_flickering  -> repeated rapid up/down changes
+    """
+
+    out = []
+
+    if "I" not in found:
+        return out
+
+    icols = found["I"]
+
+    for face, panels in _peer_groups(icols, "I").items():
+
+        if len(panels) < 3:
+            continue
+
+        # ---------------------------------------------------------------------
+        # Current frame
+        # ---------------------------------------------------------------------
+
+        I = pd.DataFrame({
+            p: pd.to_numeric(grid[icols[p]], errors="coerce")
+            for p in panels
+        })
+
+        # Only consider periods where the array is producing.
+        live = I.max(axis=1) > DAYLIGHT_MIN_CURRENT
+        I = I[live]
+
+        if len(I) < FLICKER_MIN_SAMPLES:
+            continue
+
+        # ---------------------------------------------------------------------
+        # Peer reference at each instant
+        # ---------------------------------------------------------------------
+
+        peer_ref = I.median(axis=1)
+
+        # Avoid division by very small values.
+        valid_ref = peer_ref > DAYLIGHT_MIN_CURRENT
+
+        I = I[valid_ref]
+        peer_ref = peer_ref[valid_ref]
+
+        if len(I) < FLICKER_MIN_SAMPLES:
+            continue
+
+        # ---------------------------------------------------------------------
+        # Examine each panel
+        # ---------------------------------------------------------------------
+
+        for p in panels:
+
+            ratio = (
+                I[p] / peer_ref
+            ).replace([np.inf, -np.inf], np.nan).dropna()
+
+            if len(ratio) < FLICKER_MIN_SAMPLES:
+                continue
+
+            # ---------------------------------------------------------------
+            # Consecutive change in panel/peer ratio.
+            #
+            # Example:
+            #
+            # 1.00 -> 0.99 -> 1.01 -> 0.55 -> 1.02
+            #
+            # The 0.55 transition is a strong flicker event.
+            # ---------------------------------------------------------------
+
+            step = ratio.diff().abs()
+
+            # Require the change itself to be substantial.
+            large_step = step >= FLICKER_STEP_THRESHOLD
+
+            # ---------------------------------------------------------------
+            # Check whether the peers themselves moved.
+            #
+            # If the entire array changes suddenly, it is probably irradiance
+            # variation rather than a panel-specific electrical problem.
+            # ---------------------------------------------------------------
+
+            peer_without_panel = I.drop(columns=[p], errors="ignore")
+
+            if peer_without_panel.shape[1] < 2:
+                continue
+
+            peer_median = peer_without_panel.median(axis=1)
+
+            peer_step = peer_median.pct_change().abs()
+
+            # A panel-specific event should happen while the peer group is
+            # comparatively stable.
+            peer_stable = peer_step <= FLICKER_PEER_RATIO_TOLERANCE
+
+            events = large_step & peer_stable
+
+            event_count = int(events.sum())
+
+            if event_count < FLICKER_MIN_EVENTS:
+                continue
+
+            # ---------------------------------------------------------------
+            # Require the behaviour to occupy a meaningful fraction of the
+            # panel's producing time.
+            # ---------------------------------------------------------------
+
+            event_fraction = event_count / len(ratio)
+
+            if event_fraction < FLICKER_MIN_FRACTION:
+                continue
+
+            # ---------------------------------------------------------------
+            # Look for actual back-and-forth behaviour.
+            #
+            # A single step down is not necessarily flickering. We want
+            # repeated reversals in direction.
+            # ---------------------------------------------------------------
+
+            direction = ratio.diff()
+
+            sign = np.sign(direction)
+
+            reversal = (
+                (sign != sign.shift()) &
+                (sign != 0) &
+                (sign.shift() != 0)
+            )
+
+            reversal_events = reversal & peer_stable
+
+            reversal_count = int(reversal_events.sum())
+
+            # Flickering should contain repeated reversals, not just one
+            # permanent change.
+            if reversal_count < FLICKER_MIN_EVENTS:
+                continue
+
+            # ---------------------------------------------------------------
+            # Severity
+            # ---------------------------------------------------------------
+
+            severity = (
+                "high"
+                if event_count >= FLICKER_MIN_EVENTS * 3
+                or event_fraction >= 0.15
+                else "medium"
+            )
+
+            out.append({
+                "type": "current_flickering",
+                "family": "I",
+                "panel": p,
+                "group": face,
+                "day": day_label,
+                "event_count": event_count,
+                "reversal_count": reversal_count,
+                "event_fraction": round(event_fraction, 3),
+                "median_ratio": round(float(ratio.median()), 3),
+                "severity": severity,
+                "detail": (
+                    f"I_{p} showed {event_count} rapid current changes "
+                    f"({reversal_count} reversals) relative to its peers "
+                    f"during {100 * event_fraction:.1f}% of producing samples, "
+                    f"consistent with intermittent current flickering"
+                ),
+            })
+
+    return out
 # =============================================================================
 #   PEER COMPARISON
 # =============================================================================
@@ -863,18 +1043,10 @@ def run_on_frame(wide, interval_s=None, label="supabase"):
         day_label = str(day.date())
         if len(chunk) < MIN_SAMPLES:
             continue
-        findings += detect_nocturnal_offset(
-          chunk,
-          found,
-          day_label
-      )
-      
-      findings += detect_sensor_flatlining(
-          chunk,
-          found,
-          day_label,
-          interval_s
-      )
+        findings += detect_low_current(chunk, found, day_label)
+        findings += detect_current_flickering(chunk, found, day_label)
+        findings += detect_diode_faults(chunk, found, day_label)
+        findings += detect_branch_failure(chunk, found, day_label)
         for fam in found:
             if G.CHANNELS.get(fam, {}).get("derived"):
                 continue
@@ -916,18 +1088,11 @@ def run(data_root=None, out_dir=None, push=False):
         if len(chunk) < MIN_SAMPLES:
             continue
     
-        findings += detect_nocturnal_offset(
-            chunk,
-            found,
-            label
-        )
-        
-        findings += detect_sensor_flatlining(
-            chunk,
-            found,
-            label,
-            interval_s
-        )
+        findings += detect_low_current(chunk, found, label)
+        findings += detect_current_flickering(chunk, found, label)
+        findings += detect_diode_faults(chunk, found, label)
+        findings += detect_branch_failure(chunk, found, label)
+      
         for fam in found:
             if G.CHANNELS.get(fam, {}).get("derived"):
                 continue   # derived channels inherit their inputs' faults
