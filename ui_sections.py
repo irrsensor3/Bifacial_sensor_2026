@@ -1369,18 +1369,15 @@ def _forced_sensors_cached() -> frozenset:
     return frozenset()
 
 
-def get_forced_sensors() -> set:
-    """Best-effort read of which sensor IDs currently have the
-    sub-zero cutoff overridden (pi_settings.force_log_sensors, a
-    jsonb array of ints). Returns an empty set (i.e. nothing forced —
-    normal/safe behavior) if the column/row doesn't exist yet or the
-    request fails, so a Supabase hiccup never shows a false 'currently
-    forcing' state.
-
-    Cached for 3s and invalidated on every write. Previously uncached, which
-    meant a round trip to Supabase on every single rerun -- and with 24 toggle
-    buttons on two pages, every click paid for one."""
-    return set(_forced_sensors_cached())
+def get_forced_sensors():
+    result = (
+        supabase
+        .table("sensor_logging_config")
+        .select("sensor_id")
+        .eq("logging_mode", "force_log")
+        .execute()
+    )
+    return [row["sensor_id"] for row in (result.data or [])]
 
 
 def set_sensor_force(sensor_id: int, forced: bool) -> bool:
@@ -1416,33 +1413,33 @@ def _excluded_sensors_cached() -> frozenset:
     return frozenset()
 
 
-def get_excluded_sensors() -> set:
-    """Best-effort read of which sensor IDs are force-excluded — discarded
-    even when the reading would otherwise pass the normal 0°C cutoff.
-    Mutually exclusive with force-logging: a sensor is forced on, forced
-    off, or on the normal cutoff — never two at once."""
-    return set(_excluded_sensors_cached())
+def get_excluded_sensors():
+    result = (
+        supabase
+        .table("sensor_logging_config")
+        .select("sensor_id")
+        .eq("logging_mode", "force_unlog")
+        .execute()
+    )
+
+    return [row["sensor_id"] for row in (result.data or [])]
 
 
-def set_sensor_exclude(sensor_id: int, excluded: bool) -> bool:
-    """Toggle a sensor's force-exclude override. Turning this on clears any
-    force-log override on the same sensor — the Pi can't be told to both
-    always keep and always discard the same reading."""
-    try:
-        current = get_excluded_sensors()
-        if excluded:
-            current.add(sensor_id)
-        else:
-            current.discard(sensor_id)
-        supabase.table("pi_settings").update(
-            {"force_exclude_sensors": sorted(current)}
-        ).eq("id", 1).execute()
-        _excluded_sensors_cached.clear()
-        if excluded and sensor_id in get_forced_sensors():
-            set_sensor_force(sensor_id, False)
-        return True
-    except Exception:
-        return False
+def set_sensor_exclude(sensor_id, excluded):
+    mode = "force_unlog" if excluded else "normal"
+
+    result = (
+        supabase
+        .table("sensor_logging_config")
+        .upsert({
+            "sensor_id": sensor_id,
+            "logging_mode": mode,
+            "updated_at": "now()",
+        })
+        .execute()
+    )
+
+    return bool(result.data)
 
 def _safe_query(table: str, limit: int, label: str):
     """Run a Supabase read and surface failures as a message rather than a
