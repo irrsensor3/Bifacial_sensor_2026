@@ -8,6 +8,8 @@ from ui_sections import (
     fetch_recent_alerts,
     get_forced_sensors,
     set_sensor_force,
+    get_excluded_sensors,
+    set_sensor_exclude,
 )
 
 # =========================
