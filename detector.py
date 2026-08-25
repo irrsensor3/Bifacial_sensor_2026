@@ -65,6 +65,14 @@ NOCTURNAL_IRR_THRESHOLD = 20.0      # W/m²
 NOCTURNAL_MIN_SAMPLES = 10
 NOCTURNAL_MIN_FRACTION = 0.20       # 20% of nighttime samples
 
+# Sensor flatlining
+FLATLINE_MIN_SAMPLES = 20
+FLATLINE_MIN_DURATION_MIN = 10
+FLATLINE_VALUE_TOLERANCE = {
+    "Irr": 1.0,      # W/m²
+    "T": 0.05,       # °C
+}
+FLATLINE_MIN_FRACTION = 0.20
 # =============================================================================
 #  DATETIME FAULTS
 # =============================================================================
@@ -217,6 +225,129 @@ def detect_nocturnal_offset(grid, found, day_label):
                 f"maximum {max_value:.1f} W/m²)"
             ),
         })
+
+    return out
+
+# =============================================================================
+#  SENSOR FLATLINING
+# =============================================================================
+
+def detect_sensor_flatlining(grid, found, day_label, interval_s):
+    """Detect sensors whose value remains suspiciously constant for too long.
+
+    A healthy sensor should normally show at least some variation over time,
+    particularly during daylight. A flatlined sensor can still sit at a
+    perfectly plausible value, so peer comparison alone may not catch it.
+
+    The detector looks for long consecutive runs where the sensor changes by
+    less than a small tolerance. It reports the sensor only when the flatline
+    occupies a meaningful fraction of the day's valid readings.
+    """
+    out = []
+
+    if grid is None or grid.empty:
+        return out
+
+    for fam, cols in found.items():
+
+        # Only inspect physical sensor families.
+        if G.CHANNELS.get(fam, {}).get("derived"):
+            continue
+
+        tolerance = FLATLINE_VALUE_TOLERANCE.get(fam)
+        if tolerance is None:
+            continue
+
+        for panel, col in cols.items():
+
+            series = pd.to_numeric(
+                grid[col], errors="coerce"
+            ).dropna()
+
+            if len(series) < MIN_SAMPLES:
+                continue
+
+            # Consecutive samples are considered flat when their change is
+            # smaller than the family-specific tolerance.
+            delta = series.diff().abs()
+
+            flat = delta <= tolerance
+
+            # A change from NaN/start of series should not start a flatline.
+            flat.iloc[0] = False
+
+            # Find consecutive flat runs.
+            groups = (flat != flat.shift()).cumsum()
+
+            max_run = 0
+            total_flat = 0
+
+            for _, run in flat.groupby(groups):
+                if not bool(run.iloc[0]):
+                    continue
+
+                run_len = len(run)
+
+                if run_len >= FLATLINE_MIN_SAMPLES:
+                    max_run = max(max_run, run_len)
+                    total_flat += run_len
+
+            if max_run < FLATLINE_MIN_SAMPLES:
+                continue
+
+            duration_min = (
+                max_run * float(interval_s) / 60.0
+            )
+
+            if duration_min < FLATLINE_MIN_DURATION_MIN:
+                continue
+
+            flat_fraction = total_flat / len(series)
+
+            if flat_fraction < FLATLINE_MIN_FRACTION:
+                continue
+
+            # Use the longest flat segment as the primary evidence.
+            longest_value = None
+
+            delta = series.diff().abs()
+            flat = delta <= tolerance
+            flat.iloc[0] = False
+            groups = (flat != flat.shift()).cumsum()
+
+            for _, run in flat.groupby(groups):
+                if not bool(run.iloc[0]):
+                    continue
+
+                if len(run) == max_run:
+                    idx = run.index
+                    if len(idx):
+                        longest_value = float(series.loc[idx].median())
+                    break
+
+            severity = (
+                "high"
+                if duration_min >= 30 and flat_fraction >= 0.50
+                else "medium"
+            )
+
+            out.append({
+                "type": "sensor_flatlining",
+                "family": fam,
+                "panel": panel,
+                "day": day_label,
+                "duration_minutes": round(duration_min, 1),
+                "flat_fraction": round(flat_fraction, 3),
+                "value": round(longest_value, 3)
+                    if longest_value is not None else None,
+                "tolerance": tolerance,
+                "severity": severity,
+                "detail": (
+                    f"{fam}_{panel} remained effectively constant at "
+                    f"{longest_value:.3g} for about {duration_min:.0f} min "
+                    f"({100*flat_fraction:.0f}% of valid readings)"
+                ),
+            })
 
     return out
 
@@ -661,10 +792,17 @@ def run_on_frame(wide, interval_s=None, label="supabase"):
         if len(chunk) < MIN_SAMPLES:
             continue
         findings += detect_nocturnal_offset(
-            chunk,
-            found,
-            day_label
-        )
+          chunk,
+          found,
+          day_label
+      )
+      
+      findings += detect_sensor_flatlining(
+          chunk,
+          found,
+          day_label,
+          interval_s
+      )
         for fam in found:
             if G.CHANNELS.get(fam, {}).get("derived"):
                 continue
@@ -711,7 +849,13 @@ def run(data_root=None, out_dir=None, push=False):
             found,
             label
         )
-    
+        
+        findings += detect_sensor_flatlining(
+            chunk,
+            found,
+            label,
+            interval_s
+        )
         for fam in found:
             if G.CHANNELS.get(fam, {}).get("derived"):
                 continue   # derived channels inherit their inputs' faults
