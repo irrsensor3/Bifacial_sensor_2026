@@ -241,25 +241,33 @@ def render_panel_array():
 
 def _render_detail(df_alerts, readings, logging_config, is_admin):
     selected = st.session_state.selected_sensor
+
     if selected is None:
         st.info("Select a sensor above to see its readings and logging status.")
         return
 
     face = "rear"
     row_no = pos = None
+
     for cfg in SENSOR_LAYOUT:
         if selected in (cfg["front_a"], cfg["front_b"]):
             face, row_no = "front", cfg["row"]
+
         elif selected in cfg["panel_sensors"]:
             face = "rear"
             row_no = cfg["row"]
             pos = cfg["panel_sensors"].index(selected) + 1
 
     where = f"row {row_no}" if row_no else "unknown row"
+
     if face == "front":
         where += " · front reference"
+
     elif pos:
-        where += f" · panel {pos}" + (" (row end)" if pos in EDGE_POSITIONS else " (interior)")
+        where += (
+            f" · panel {pos}"
+            + (" (row end)" if pos in EDGE_POSITIONS else " (interior)")
+        )
 
     st.subheader(f"Sensor {selected}")
     st.caption(where)
@@ -267,52 +275,94 @@ def _render_detail(df_alerts, readings, logging_config, is_admin):
     irr_val = readings.get(selected)
     alert = _last_subzero_alert(df_alerts, selected)
 
-    cols = st.columns(3) if is_admin else st.columns(2)
-    cols[0].metric("Irradiance", f"{irr_val:,.1f} W/m²" if irr_val is not None else "No reading")
+    # --------------------------------------------------------------
+    # NORMAL USER VIEW
+    # --------------------------------------------------------------
+
+    if not is_admin:
+        cols = st.columns(2)
+
+        cols[0].metric(
+            "Irradiance",
+            f"{irr_val:,.1f} W/m²"
+            if irr_val is not None
+            else "No reading"
+        )
+
+        cols[1].metric(
+            "Last sub-zero reading",
+            f"{alert[0]} °C" if alert else "None logged",
+            help=(
+                f"Recorded {alert[1]}"
+                if alert
+                else "This sensor has never tripped the 0 °C threshold."
+            ),
+        )
+
+        return
+
+    # --------------------------------------------------------------
+    # ADMIN VIEW
+    # --------------------------------------------------------------
+
+    current_mode = logging_config.get(selected, "normal")
+
+    mode_labels = {
+        "normal": "Normal",
+        "force_log": "Force Log",
+        "force_unlog": "Force Unlog",
+    }
+
+    cols = st.columns(3)
+
+    cols[0].metric(
+        "Irradiance",
+        f"{irr_val:,.1f} W/m²"
+        if irr_val is not None
+        else "No reading"
+    )
+
     cols[1].metric(
         "Last sub-zero reading",
         f"{alert[0]} °C" if alert else "None logged",
-        help=f"Recorded {alert[1]}" if alert else "This sensor has never tripped the 0 °C threshold.",
+        help=(
+            f"Recorded {alert[1]}"
+            if alert
+            else "This sensor has never tripped the 0 °C threshold."
+        ),
     )
 
-    if is_admin:
-        current_mode = logging_config.get(selected, "normal")
-    
-        mode_labels = {
-            "normal": "Normal",
-            "force_log": "Force Log",
-            "force_unlog": "Force Unlog",
-        }
-    
-        cols[2].metric(
-            "Logging mode",
-            mode_labels.get(current_mode, "Normal")
-        )
-    
-        new_mode = st.selectbox(
-            "Logging mode",
-            options=["normal", "force_log", "force_unlog"],
-            format_func=lambda x: mode_labels[x],
-            index=["normal", "force_log", "force_unlog"].index(current_mode),
-            key=f"panel_array_logging_mode_{selected}",
-        )
-    
-        if new_mode != current_mode:
-            if set_sensor_logging_mode(selected, new_mode):
-                st.success(
-                    f"Sensor {selected} set to "
-                    f"{mode_labels[new_mode]}."
-                )
-                st.rerun()
-            else:
-                st.error(
-                    f"Sensor {selected} was not updated — "
-                    "the write did not go through."
-                )
-        with c2:
-            action2 = "Stop excluding" if excluded else "Force unlogging"
-            if st.button(action2, key=f"panel_array_toggle_exclude_{selected}", use_container_width=True):
-                if set_sensor_exclude(selected, not excluded):
-                    st.rerun()
-                else:
-                    st.error(f"Sensor {selected} was not updated — the write did not go through.")
+    cols[2].metric(
+        "Logging mode",
+        mode_labels.get(current_mode, "Normal")
+    )
+
+    # --------------------------------------------------------------
+    # ADMIN LOGGING-MODE CONTROL
+    # --------------------------------------------------------------
+
+    new_mode = st.selectbox(
+        "Logging mode",
+        options=["normal", "force_log", "force_unlog"],
+        format_func=lambda x: mode_labels[x],
+        index=["normal", "force_log", "force_unlog"].index(current_mode),
+        key=f"panel_array_logging_mode_{selected}",
+    )
+
+    if new_mode != current_mode:
+
+        if set_sensor_logging_mode(selected, new_mode):
+
+            st.success(
+                f"Sensor {selected} set to "
+                f"{mode_labels[new_mode]}."
+            )
+
+            st.rerun()
+
+        else:
+
+            st.error(
+                f"Sensor {selected} was not updated — "
+                "the write did not go through."
+            )
