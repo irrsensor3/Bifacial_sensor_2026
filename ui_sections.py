@@ -375,8 +375,8 @@ def inject_theme():
         .stButton > button p, .stButton > button div, .stButton > button span { color: inherit !important; }
 
         /* Option text inside radios and checkboxes is also wrapped in <label>, so the
-           widget-label styling below was shrinking it, upper-casing it and greying
-           it out until the choices rendered as bare unlabelled dots. */
+           widget-label styling below shrank it, upper-cased it and greyed it out
+           until the choices rendered as bare unlabelled dots. */
         div[role="radiogroup"] label, div[role="radiogroup"] label p,
         [data-baseweb="radio"] label, [data-baseweb="checkbox"] label,
         [data-testid="stCheckbox"] label, [data-testid="stRadio"] label p {

@@ -141,8 +141,9 @@ def render_overview(expanded: bool):
         ),
         stats=[
             # Front and rear kept apart: the difference between them is the
-            # measurement, and one combined average erases it. The live counts
-            # matter too -- only some front sensors have been reporting.
+            # measurement this project exists to make, and one combined average
+            # erases it. The live counts matter too, since not every front
+            # sensor has been reporting.
             ("Front irradiance",
              "—" if front_irr != front_irr else f"{front_irr:,.0f}",
              f"W/m² · {n_front} of 8", "warm"),
