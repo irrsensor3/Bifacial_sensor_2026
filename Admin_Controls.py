@@ -6,6 +6,10 @@ from ui_sections import (
     supabase,
 )
 
+TILT_PANEL_COUNT = 24
+DEFAULT_TILT_DEG = 10.0
+TILT_TABLE = "panel_tilt_config"
+
 
 def render_admin_controls():
     require_login(role="admin")
@@ -101,3 +105,90 @@ def render_admin_controls():
                 )
         except Exception as exc:
             st.error(f"Could not reach the database: {exc}")
+
+    # -------------------------
+    # Panel tilt configuration
+    # -------------------------
+    st.divider()
+    st.subheader("Panel tilt configuration")
+    st.caption(
+        "Tilt angle for each panel. The anomaly detector uses this to decide "
+        "which panels are fair peers to compare against each other — panels "
+        "within a couple of degrees of one another are treated as the same "
+        "tilt, panels tilted noticeably differently are compared separately, "
+        "so a deliberate difference in tilt is never reported as a fault."
+    )
+
+    render_tilt_config()
+
+
+def _load_tilt_rows():
+    """Current tilt_angle for every configured panel, keyed by panel_id.
+    Reported as empty (not raised) on a database problem, same pattern as
+    the rest of this page — a read failure here should not crash the form,
+    it should just show the defaults."""
+    try:
+        res = supabase.table(TILT_TABLE).select("panel_id, tilt_angle").execute()
+        return {int(r["panel_id"]): float(r["tilt_angle"]) for r in (res.data or [])}
+    except Exception as exc:
+        st.warning(
+            f"Could not load saved tilt values, showing defaults instead: {exc}"
+        )
+        return {}
+
+
+def render_tilt_config():
+    existing = _load_tilt_rows()
+
+    with st.form("tilt_config_form"):
+        default_tilt = st.number_input(
+            "Default tilt (°) — prefills any panel not already saved below",
+            min_value=0.0, max_value=90.0, value=DEFAULT_TILT_DEG, step=1.0,
+            help="Only affects panels that have never been saved. Changing "
+                 "this and re-submitting does not overwrite panels you've "
+                 "already set individually below.",
+        )
+
+        st.caption(f"Panel 1–{TILT_PANEL_COUNT}")
+
+        tilt_inputs = {}
+        cols_per_row = 4
+        panel_ids = list(range(1, TILT_PANEL_COUNT + 1))
+        for i in range(0, len(panel_ids), cols_per_row):
+            row_cols = st.columns(cols_per_row)
+            for col, pid in zip(row_cols, panel_ids[i:i + cols_per_row]):
+                with col:
+                    tilt_inputs[pid] = st.number_input(
+                        f"Panel {pid}",
+                        min_value=0.0, max_value=90.0,
+                        value=float(existing.get(pid, default_tilt)),
+                        step=1.0,
+                        key=f"tilt_panel_{pid}",
+                    )
+
+        submitted = st.form_submit_button(
+            "Save tilt configuration", type="primary"
+        )
+
+    if submitted:
+        rows = [
+            {"panel_id": pid, "tilt_angle": angle}
+            for pid, angle in tilt_inputs.items()
+        ]
+        try:
+            supabase.table(TILT_TABLE).upsert(
+                rows, on_conflict="panel_id"
+            ).execute()
+            st.success(
+                f"Saved tilt for {len(rows)} panel(s). The anomaly detector "
+                f"picks this up on its next run."
+            )
+        except Exception as exc:
+            st.error(
+                f"Tilt configuration was NOT saved — the database write "
+                f"failed: {exc}"
+            )
+            st.caption(
+                f"The {TILT_TABLE} table may not exist yet — see "
+                f"panel_tilt_config.sql."
+            )
