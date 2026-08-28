@@ -5,6 +5,7 @@ from ui_sections import (
     login,
     inject_theme,
     solar_day_bar,
+    split_irradiance,
     hero,
     feature_cards,
     array_diagram,
@@ -111,7 +112,7 @@ def render_overview(expanded: bool):
     # would render unlit and the array would look half-dead.
     df_panel = fetch_latest_panel_readings(limit=200)
 
-    irr = _average_irradiance(df_live)
+    front_irr, rear_irr, n_front, n_rear = split_irradiance(df_live)
     power = _average_power(df_panel)
 
     sensors_live = 0
@@ -139,9 +140,16 @@ def render_overview(expanded: bool):
             "module temperature, and panel meter output — sampled continuously."
         ),
         stats=[
-            ("Irradiance", f"{irr:,.0f}", "W/m²", "warm"),
+            # Front and rear kept apart: the difference between them is the
+            # measurement, and one combined average erases it. The live counts
+            # matter too -- only some front sensors have been reporting.
+            ("Front irradiance",
+             "—" if front_irr != front_irr else f"{front_irr:,.0f}",
+             f"W/m² · {n_front} of 8", "warm"),
+            ("Rear irradiance",
+             "—" if rear_irr != rear_irr else f"{rear_irr:,.0f}",
+             f"W/m² · {n_rear} of 16", "cool"),
             ("Panel power", f"{power:,.2f}", "kW", "cool"),
-            ("Sensors reporting", f"{sensors_live}", "of 24", None),
             ("Last sample", last_seen, "", None),
         ],
     )

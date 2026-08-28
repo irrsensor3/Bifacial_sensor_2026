@@ -1,4 +1,5 @@
 import streamlit as st
+import numpy as np
 import pandas as pd
 from docx import Document
 from io import BytesIO
@@ -373,6 +374,19 @@ def inject_theme():
         }
         .stButton > button p, .stButton > button div, .stButton > button span { color: inherit !important; }
 
+        /* Option text inside radios and checkboxes is also wrapped in <label>, so the
+           widget-label styling below was shrinking it, upper-casing it and greying
+           it out until the choices rendered as bare unlabelled dots. */
+        div[role="radiogroup"] label, div[role="radiogroup"] label p,
+        [data-baseweb="radio"] label, [data-baseweb="checkbox"] label,
+        [data-testid="stCheckbox"] label, [data-testid="stRadio"] label p {
+            color: var(--ink) !important;
+            font-size: .9rem !important;
+            font-weight: 500 !important;
+            text-transform: none !important;
+            letter-spacing: normal !important;
+        }
+
         label, [data-testid="stWidgetLabel"], [data-testid="stWidgetLabel"] p {
             color: var(--ink-mid) !important; font-size: .78rem !important;
             font-weight: 600 !important; text-transform: uppercase;
@@ -643,6 +657,33 @@ def hero(title, subtitle, stats=None, eyebrow="Bifacial PV monitoring"):
 # Front reference sensors, from the Pi's channel numbering: each row is
 # Front A, four rear sensors, Front B.
 FRONT_BY_BLOCK = {"B1": (1, 6), "B2": (7, 12), "B3": (13, 18), "B4": (19, 24)}
+
+
+def split_irradiance(df_live):
+    """Average front and rear irradiance separately.
+
+    A single combined figure hides the thing this project measures. Front
+    sensors see the direct beam, rear sensors see what the roof reflects, and
+    the gap between them IS the bifacial gain -- averaged together they become
+    a number that describes neither.
+
+    Returns (front_mean, rear_mean, n_front_live, n_rear_live).
+    """
+    fronts = [c for pair in FRONT_BY_BLOCK.values() for c in pair]
+    if df_live is None or df_live.empty:
+        return float("nan"), float("nan"), 0, 0
+    row = df_live.iloc[-1]
+    fv, rv = [], []
+    for ch in range(1, 25):
+        col = f"Irr_{ch}"
+        if col not in df_live.columns:
+            continue
+        v = pd.to_numeric(row.get(col), errors="coerce")
+        if pd.isna(v):
+            continue
+        (fv if ch in fronts else rv).append(float(v))
+    return (float(np.mean(fv)) if fv else float("nan"),
+            float(np.mean(rv)) if rv else float("nan"), len(fv), len(rv))
 
 
 def array_diagram(values=None, unit="W", title="Live array", front=None):
