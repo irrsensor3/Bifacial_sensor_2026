@@ -1,13 +1,28 @@
 # Pinned to major versions. Previously unpinned, so a new Streamlit release
 # could break the deployed app without anyone changing a line of code.
 # Bump deliberately, then redeploy and check the pages still render.
+
 streamlit>=1.36,<2.0
 pandas>=2.0,<3.0
+
+# Imported directly by ui_sections.py and pv_gapfill.py. It arrives with pandas
+# in practice, but listing it means a change to pandas' own pinning cannot
+# break this app for a reason nobody would think to look for.
+numpy>=1.24,<3.0
+
 matplotlib>=3.7,<4.0
+plotly>=5.18,<7.0
+
+# Needed by pv_gapfill.py, which detector.py and the Anomalies page import.
+# Streamlit imports every page at launch, so without this the WHOLE app fails
+# to start, not just the one page that uses it.
+scikit-learn>=1.3,<2.0
+
+# Report generation
 python-docx>=1.1,<2.0
 fpdf2>=2.7,<3.0
+
+# Data sources
 supabase>=2.0,<3.0
 google-api-python-client>=2.100,<3.0
 google-auth>=2.30,<3.0
-plotly>=5.18,<7.0
-scikit-learn
