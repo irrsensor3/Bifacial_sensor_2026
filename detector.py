@@ -162,137 +162,92 @@ OUT_OF_BOUNDS_LIMITS = {
 }
 
 # =============================================================================
-#  TILT-AWARE NORMALIZATION
+#  TILT-AWARE PEER GROUPING
 # =============================================================================
-
-# Panel tilt angle in degrees.
+#  Panel tilt angles, keyed by physical sensor/panel id (1-24). Set by the
+#  admin from the "Panel tilt configuration" screen in Admin Controls and
+#  stored in Supabase (table: panel_tilt_config). Panels within
+#  TILT_TOLERANCE_DEG of each other are treated as fair peers for comparison
+#  detectors; panels tilted meaningfully differently from the rest of their
+#  group are compared separately instead, because tilt changes the
+#  irradiance/output a healthy panel should read -- comparing a 10 deg panel
+#  against a 20 deg panel would otherwise report that geometry difference as
+#  a fault, the same mistake PEER_BY_POSITION exists to avoid for row-end
+#  panels.
 #
-# Replace these values with the actual physical tilt angles from your
-# installation / Panel_array.py configuration.
-#
-# Example:
-#   Position 1 -> 0°
-#   Position 2 -> 10°
-#   Position 3 -> 20°
-#   Position 4 -> 30°
+#  Every panel defaults to DEFAULT_TILT_DEG until the admin sets otherwise,
+#  which reproduces today's behaviour (tilt plays no role in grouping) until
+#  someone actually configures mixed tilts.
 
-PANEL_TILT = {
-    1: 0.0,
-    2: 10.0,
-    3: 20.0,
-    4: 30.0,
-}
+DEFAULT_TILT_DEG = 10.0
+TILT_TOLERANCE_DEG = 2.0   # panels within this many degrees count as "same tilt"
 
-# =============================================================================
-#  OUT-OF-BOUNDS CHECKS
-# =============================================================================
+_TILT_CACHE = None   # populated by load_tilt_config(), reused for the run
 
-def detect_out_of_bounds(grid, found, day_label):
-    """Detect physically impossible or clearly invalid sensor readings.
 
-    Each sensor family is checked against its own physical validity range.
+def load_tilt_config(client=None, force=False):
+    """Load per-panel tilt angles from Supabase.
 
-    This detector is intentionally independent of peer comparison. A reading
-    can be abnormal even when all of its peers are also abnormal, and a single
-    impossible reading should still be reported even if the rest of the array
-    is healthy.
+    Any panel not present in the table is treated as DEFAULT_TILT_DEG, so an
+    unconfigured array behaves exactly as before this feature existed.
+    Cached for the process; pass force=True (e.g. once at the start of a run)
+    to pick up admin edits made since the cache was filled.
 
-    Examples:
-        Irr < 0 W/m²
-        Irr > physically plausible maximum
-        Temperature outside sensor/application limits
-        Negative current
-        Negative voltage
+    Never raises: a database problem should not stop anomaly detection, it
+    should just fall back to "every panel is at the default tilt", i.e. tilt
+    plays no role in peer grouping for that run.
     """
+    global _TILT_CACHE
+    if _TILT_CACHE is not None and not force:
+        return _TILT_CACHE
 
-    out = []
+    tilt = {}
 
-    if grid is None or grid.empty:
-        return out
+    if client is None:
+        try:
+            from ui_sections import supabase as client
+        except Exception:
+            client = None
 
-    for fam, limits in OUT_OF_BOUNDS_LIMITS.items():
-
-        cols = found.get(fam, {})
-
-        if not cols:
-            continue
-
-        lower = limits.get("min")
-        upper = limits.get("max")
-
-        for panel, col in cols.items():
-
-            series = pd.to_numeric(
-                grid[col],
-                errors="coerce"
+    if client is not None:
+        try:
+            res = (
+                client.table("panel_tilt_config")
+                .select("panel_id, tilt_angle")
+                .execute()
             )
+            for row in (res.data or []):
+                pid = row.get("panel_id")
+                ang = row.get("tilt_angle")
+                if pid is not None and ang is not None:
+                    tilt[int(pid)] = float(ang)
+        except Exception as exc:
+            print(f"[TILT ] could not read panel_tilt_config: {exc}")
+            print("        Falling back to a flat "
+                  f"{DEFAULT_TILT_DEG:g} deg for every panel; the table may "
+                  "not exist yet -- see panel_tilt_config.sql")
 
-            valid = series.notna()
+    _TILT_CACHE = tilt
+    return tilt
 
-            if not valid.any():
-                continue
 
-            low = valid & (series < lower)
-            high = valid & (series > upper)
+def _tilt_of(panel, tilt_config):
+    try:
+        return float(tilt_config.get(int(panel), DEFAULT_TILT_DEG))
+    except (TypeError, ValueError):
+        return DEFAULT_TILT_DEG
 
-            low_count = int(low.sum())
-            high_count = int(high.sum())
-            total_bad = low_count + high_count
 
-            if total_bad == 0:
-                continue
+def _tilt_bucket(panel, tilt_config, tolerance=TILT_TOLERANCE_DEG):
+    """A coarse bucket such that two panels within `tolerance` degrees of
+    each other usually land in the same bucket. Not exact right at a bucket
+    edge -- good enough for deciding who is a fair peer, not for measurement.
+    """
+    if tolerance <= 0:
+        return 0
+    return int(round(_tilt_of(panel, tilt_config) / tolerance))
 
-            bad_values = series[low | high]
 
-            min_bad = float(bad_values.min())
-            max_bad = float(bad_values.max())
-
-            total_valid = int(valid.sum())
-            fraction = total_bad / total_valid if total_valid else 0.0
-
-            # A physically impossible value is serious even if it happens
-            # only once. Repeated invalid values are also reported.
-            severity = (
-                "high"
-                if fraction >= 0.05 or total_bad >= 20
-                else "medium"
-            )
-
-            directions = []
-
-            if low_count:
-                directions.append(
-                    f"{low_count:,} below {lower:g}"
-                )
-
-            if high_count:
-                directions.append(
-                    f"{high_count:,} above {upper:g}"
-                )
-
-            out.append({
-                "type": "out_of_bounds",
-                "family": fam,
-                "panel": panel,
-                "day": day_label,
-                "lower_limit": lower,
-                "upper_limit": upper,
-                "bad_samples": total_bad,
-                "bad_fraction": round(fraction, 4),
-                "low_count": low_count,
-                "high_count": high_count,
-                "minimum_bad_value": round(min_bad, 3),
-                "maximum_bad_value": round(max_bad, 3),
-                "severity": severity,
-                "detail": (
-                    f"{fam}_{panel} produced {total_bad:,} out-of-bounds "
-                    f"reading(s): {', '.join(directions)}; "
-                    f"observed invalid range "
-                    f"{min_bad:.3g} to {max_bad:.3g}"
-                ),
-            })
-
-    return out
 # =============================================================================
 #  DATETIME FAULTS
 # =============================================================================
@@ -1079,41 +1034,68 @@ def detect_current_flickering(grid, found, day_label):
 #   PEER COMPARISON
 # =============================================================================
 
-# Match peers on position as well as face where there are enough of them.
-# P1 and P4 are block ends and see more reflected light than P2 and P3, so a
-# mixed group carries that spread as if it were noise -- which raises the bar a
-# real fault has to clear. Falls back to face-only when a position group is too
-# small to have a trustworthy median.
+# Match peers on position and tilt as well as face, wherever there are enough
+# of them. P1 and P4 are block ends and see more reflected light than P2 and
+# P3, so a mixed group carries that spread as if it were noise -- which
+# raises the bar a real fault has to clear. Two panels tilted differently are
+# the same story: their output legitimately differs by geometry, not health.
+# Falls back to the coarser grouping whenever a finer split would leave a
+# group too small to have a trustworthy median.
 PEER_BY_POSITION = True
+PEER_BY_TILT = True
 MIN_PEER_GROUP = 3
 
 
 def _peer_groups(cols, fam):
     """Panels split into the groups it is fair to compare within.
 
-    Bifacial against bifacial, and where possible P1 against P1. Mixing faces is
-    the mistake that would report the four monofacial panels as broken every
-    single day -- their 7.7% shortfall is the bifacial gain, i.e. the result.
+    Bifacial against bifacial, P1 against P1 where possible, and (once tilt
+    is configured) same-tilt against same-tilt. Mixing any of these is the
+    mistake that would report the four monofacial panels as broken every
+    single day -- their 7.7% shortfall is the bifacial gain, i.e. the result
+    -- or would do the same to a panel that is simply tilted differently on
+    purpose.
     """
+    tilt_config = load_tilt_config()
+
     by_face = {}
     for p in cols:
         face, _blk, _pos = G.config_of(p, fam)
         by_face.setdefault(face, []).append(p)
 
-    if not PEER_BY_POSITION:
-        return by_face
-
     groups = {}
+
     for face, panels in by_face.items():
-        by_pos = {}
-        for p in panels:
-            pos = G.config_of(p, fam)[2]
-            by_pos.setdefault(pos, []).append(p)
-        if all(len(v) >= MIN_PEER_GROUP for v in by_pos.values()) and len(by_pos) > 1:
-            for pos, v in by_pos.items():
-                groups[f"{face}_P{pos}"] = v
-        else:
-            groups[face] = panels
+
+        # Split by position first, same as before, falling back to the whole
+        # face when a position group would be too small to trust.
+        base = {face: panels}
+        if PEER_BY_POSITION:
+            by_pos = {}
+            for p in panels:
+                pos = G.config_of(p, fam)[2]
+                by_pos.setdefault(pos, []).append(p)
+            if all(len(v) >= MIN_PEER_GROUP for v in by_pos.values()) and len(by_pos) > 1:
+                base = {f"{face}_P{pos}": v for pos, v in by_pos.items()}
+
+        # Then split each of those groups by tilt bucket, again falling back
+        # whenever the split would leave too few panels to compare against.
+        for key, members in base.items():
+            if not PEER_BY_TILT:
+                groups[key] = members
+                continue
+
+            by_tilt = {}
+            for p in members:
+                by_tilt.setdefault(_tilt_bucket(p, tilt_config), []).append(p)
+
+            if len(by_tilt) > 1 and all(len(v) >= MIN_PEER_GROUP for v in by_tilt.values()):
+                for bucket, v in by_tilt.items():
+                    deg = round(bucket * TILT_TOLERANCE_DEG)
+                    groups[f"{key}_T{deg}"] = v
+            else:
+                groups[key] = members
+
     return groups
 
 
@@ -1406,6 +1388,123 @@ def detect_branch_failure(grid, found, day_label):
 
 
 # =============================================================================
+#  OUT-OF-BOUNDS CHECKS
+# =============================================================================
+# Physical / sensor validity limits, checked independently of peer grouping.
+# (See detect_out_of_bounds below -- this section header intentionally
+# mirrors the earlier one; the implementation lives with the other family-
+# level checks so it can run alongside them in the per-day loop.)
+
+
+def detect_out_of_bounds(grid, found, day_label):
+    """Detect physically impossible or clearly invalid sensor readings.
+
+    Each sensor family is checked against its own physical validity range.
+
+    This detector is intentionally independent of peer comparison. A reading
+    can be abnormal even when all of its peers are also abnormal, and a single
+    impossible reading should still be reported even if the rest of the array
+    is healthy.
+
+    Examples:
+        Irr < 0 W/m²
+        Irr > physically plausible maximum
+        Temperature outside sensor/application limits
+        Negative current
+        Negative voltage
+    """
+
+    out = []
+
+    if grid is None or grid.empty:
+        return out
+
+    for fam, limits in OUT_OF_BOUNDS_LIMITS.items():
+
+        cols = found.get(fam, {})
+
+        if not cols:
+            continue
+
+        lower = limits.get("min")
+        upper = limits.get("max")
+
+        for panel, col in cols.items():
+
+            series = pd.to_numeric(
+                grid[col],
+                errors="coerce"
+            )
+
+            valid = series.notna()
+
+            if not valid.any():
+                continue
+
+            low = valid & (series < lower)
+            high = valid & (series > upper)
+
+            low_count = int(low.sum())
+            high_count = int(high.sum())
+            total_bad = low_count + high_count
+
+            if total_bad == 0:
+                continue
+
+            bad_values = series[low | high]
+
+            min_bad = float(bad_values.min())
+            max_bad = float(bad_values.max())
+
+            total_valid = int(valid.sum())
+            fraction = total_bad / total_valid if total_valid else 0.0
+
+            # A physically impossible value is serious even if it happens
+            # only once. Repeated invalid values are also reported.
+            severity = (
+                "high"
+                if fraction >= 0.05 or total_bad >= 20
+                else "medium"
+            )
+
+            directions = []
+
+            if low_count:
+                directions.append(
+                    f"{low_count:,} below {lower:g}"
+                )
+
+            if high_count:
+                directions.append(
+                    f"{high_count:,} above {upper:g}"
+                )
+
+            out.append({
+                "type": "out_of_bounds",
+                "family": fam,
+                "panel": panel,
+                "day": day_label,
+                "lower_limit": lower,
+                "upper_limit": upper,
+                "bad_samples": total_bad,
+                "bad_fraction": round(fraction, 4),
+                "low_count": low_count,
+                "high_count": high_count,
+                "minimum_bad_value": round(min_bad, 3),
+                "maximum_bad_value": round(max_bad, 3),
+                "severity": severity,
+                "detail": (
+                    f"{fam}_{panel} produced {total_bad:,} out-of-bounds "
+                    f"reading(s): {', '.join(directions)}; "
+                    f"observed invalid range "
+                    f"{min_bad:.3g} to {max_bad:.3g}"
+                ),
+            })
+
+    return out
+
+
+# =============================================================================
 #  PERSISTENCE
 # =============================================================================
 
@@ -1504,6 +1603,9 @@ def run_on_frame(wide, interval_s=None):
     """
     if wide is None or wide.empty:
         return [], []
+
+    load_tilt_config(force=True)   # pick up any admin edits since last run
+
     interval_s = interval_s or G.detect_interval(wide.index)
     findings = detect_datetime_faults(wide.index, interval_s)
 
@@ -1539,6 +1641,11 @@ def run(data_root=None, out_dir=None, push=False):
     print("=" * 78)
     print("  Bifacial PV — Anomaly Detection")
     print("=" * 78)
+
+    tilt_config = load_tilt_config(force=True)
+    n_custom = sum(1 for v in tilt_config.values() if v != DEFAULT_TILT_DEG)
+    print(f"[TILT ] {len(tilt_config)} panel(s) configured, "
+          f"{n_custom} away from the {DEFAULT_TILT_DEG:g} deg default")
 
     wide, found, load_rep = G.load_all(data_root)
     interval_s = G.detect_interval(wide.index)
@@ -1596,7 +1703,8 @@ def run(data_root=None, out_dir=None, push=False):
     report = {"scanned_rows": int(len(wide)), "interval_s": interval_s,
               "families": sorted(found), "thresholds": {
                   "sigma_flag": SIGMA_FLAG, "sigma_warn": SIGMA_WARN,
-                  "persist_days": PERSIST_DAYS},
+                  "persist_days": PERSIST_DAYS,
+                  "tilt_tolerance_deg": TILT_TOLERANCE_DEG},
               "negative_cases": NEGATIVE_CASES,
               "confirmed": confirmed, "provisional": provisional}
     path = os.path.join(out_dir, "anomalies.json")
