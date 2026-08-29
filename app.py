@@ -108,7 +108,10 @@ def render_overview(expanded: bool):
     part anyone read -- so the numbers are now the design, at a size you can
     take in from across a desk.
     """
-    df_live = fetch_latest_readings(limit=5)
+    # 200 rows, not 5: the logger leaves most cells blank in any given row, so a
+    # handful of rows can miss a sensor's latest reading entirely and show a
+    # live channel as silent.
+    df_live = fetch_latest_readings(limit=200)
     # 200 rows, not 5: the diagram needs at least one recent reading per meter,
     # and the logger polls all 20 in sequence. With only 5 rows most panels
     # would render unlit and the array would look half-dead.
