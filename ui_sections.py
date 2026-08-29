@@ -843,16 +843,23 @@ def array_diagram(values=None, unit="W", title="Live array", front=None,
             # than the power figure so the panel still reads power-first.
             rv = (rear or {}).get(dev)
             if isinstance(rv, (int, float)) and rv == rv:
+                parts.append(f'<rect x="{x + panel_w/2 - 52}" y="{y + panel_h - 18}" '
+                             f'width="104" height="15" rx="3" fill="#0C1620" '
+                             f'opacity="0.55"/>')
                 parts.append(f'<text x="{x + panel_w/2}" y="{y + panel_h - 7}" '
-                             f'text-anchor="middle" fill="#1A1005" opacity="0.78" '
+                             f'text-anchor="middle" fill="#FFD9A0" opacity="0.95" '
                              f'font-family="IBM Plex Mono, monospace" '
-                             f'font-size="11" font-weight="500">{max(rv, 0):,.0f} W/m&#178; rear</text>')
+                             f'font-size="11" font-weight="500">'
+                             f'{max(rv, 0):,.0f} W/m&#178; rear</text>')
             elif rear is not None:
                 # Dark text, because this label sits on whatever colour the
                 # panel happens to be -- pale grey vanished against a bright
                 # amber cell.
+                parts.append(f'<rect x="{x + panel_w/2 - 52}" y="{y + panel_h - 18}" '
+                             f'width="104" height="15" rx="3" fill="#0C1620" '
+                             f'opacity="0.42"/>')
                 parts.append(f'<text x="{x + panel_w/2}" y="{y + panel_h - 7}" '
-                             f'text-anchor="middle" fill="#0C1620" opacity="0.55" '
+                             f'text-anchor="middle" fill="#DCE4EA" opacity="0.9" '
                              f'font-family="IBM Plex Mono, monospace" '
                              f'font-size="11">no rear sensor</text>')
             parts.append(f'<text x="{x + 8}" y="{y + 15}" fill="#8FA0AE" '
