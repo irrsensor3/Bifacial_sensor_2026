@@ -203,6 +203,74 @@ def fetch_panel_history(days: int, _progress=None) -> pd.DataFrame:
     return out
 
 
+@st.cache_data(ttl=300, show_spinner=False)
+def fetch_sensor_history(days: int, _progress=None) -> pd.DataFrame:
+    """Pull recent sensor_readings — irradiance and module temperature.
+
+    The page checked panel_readings only, so every temperature and irradiance
+    fault was invisible here: a sensor reading -9 C was caught by the detector
+    but never reached this screen, because this screen never fetched the data.
+
+    Rows arrive as a jsonb blob per timestamp with Irr_1..Irr_24 and
+    Temp_1..Temp_24 inside, so they expand straight into the wide layout the
+    detector wants -- no pivot needed, unlike the meters.
+    """
+    since = pd.Timestamp.utcnow().tz_localize(None) - pd.Timedelta(days=days)
+    rows, cursor, guard = [], None, 0
+    while len(rows) < MAX_ROWS and guard < 2000:
+        guard += 1
+        q = (supabase.table("sensor_readings")
+             .select("created_at,readings")
+             .order("created_at", desc=False)
+             .limit(PAGE_SIZE))
+        q = q.gt("created_at", cursor.isoformat()) if cursor is not None \
+            else q.gte("created_at", since.isoformat())
+        try:
+            batch = q.execute().data or []
+        except Exception as exc:
+            st.warning(f"Couldn't read sensor_readings: {exc}")
+            break
+        if not batch:
+            break
+        rows.extend(batch)
+        if _progress is not None:
+            _progress(len(rows))
+        nxt = pd.to_datetime(max(r.get("created_at") for r in batch),
+                             errors="coerce", utc=True)
+        if pd.isna(nxt):
+            break
+        nxt = nxt.tz_localize(None)
+        if cursor is not None and nxt <= cursor:
+            nxt = cursor + pd.Timedelta(milliseconds=1)
+        cursor = nxt
+        if len(batch) < PAGE_SIZE:
+            break
+
+    if not rows:
+        return pd.DataFrame()
+
+    flat = []
+    for r in rows:
+        rec = r.get("readings") or {}
+        if isinstance(rec, str):
+            try:
+                import json as _json
+                rec = _json.loads(rec)
+            except Exception:
+                continue
+        rec = dict(rec)
+        rec["created_at"] = r.get("created_at")
+        flat.append(rec)
+
+    d = pd.DataFrame(flat)
+    d["ts"] = pd.to_datetime(d["created_at"], errors="coerce",
+                             utc=True).dt.tz_localize(None)
+    d = d[d.ts.notna()].drop(columns=["created_at"]).set_index("ts").sort_index()
+    d = d[~d.index.duplicated(keep="last")]
+    d.index.name = "Timestamp"
+    return d.apply(pd.to_numeric, errors="coerce")
+
+
 def _render_findings(records, empty_message):
     if not records:
         st.success(empty_message)
@@ -260,7 +328,11 @@ def render_anomalies():
                 note.write(f"Fetched {n:,} readings…")
 
             wide = fetch_panel_history(int(days), _progress=tick)
-            note.write(f"Fetched {len(wide):,} samples. Checking every panel…")
+            note.write(f"Fetched {len(wide):,} meter samples. Reading sensors…")
+            sensors = fetch_sensor_history(int(days), _progress=tick)
+            note.write(
+                f"{len(wide):,} meter samples, {len(sensors):,} sensor samples. "
+                f"Checking every panel…")
             if wide.empty:
                 status.update(label="Nothing to analyse", state="error")
                 st.warning(
@@ -269,9 +341,22 @@ def render_anomalies():
                 )
                 return
             confirmed, provisional = D.run_on_frame(wide)
+            # Sensors are a separate logger on a different cadence, so they get
+            # their own pass rather than being gridded onto the meter timeline.
+            if not sensors.empty:
+                s_conf, s_prov = D.run_on_frame(sensors)
+                confirmed += s_conf
+                provisional += s_prov
+            elif int(days) > 0:
+                st.info(
+                    "No sensor readings for this period, so irradiance and "
+                    "temperature faults could not be checked. Only the DC "
+                    "meters were examined."
+                )
             status.update(label=f"Checked {len(wide):,} samples",
                           state="complete", expanded=False)
-        st.session_state["_anom"] = (confirmed, provisional, len(wide), int(days))
+        st.session_state["_anom"] = (confirmed, provisional,
+                                     len(wide) + len(sensors), int(days))
         # --- NEW EMAIL NOTIFICATION LOGIC ---
         if "sent_alerts" not in st.session_state:
             st.session_state.sent_alerts = set()

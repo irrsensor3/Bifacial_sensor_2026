@@ -659,6 +659,26 @@ def hero(title, subtitle, stats=None, eyebrow="Bifacial PV monitoring"):
 FRONT_BY_BLOCK = {"B1": (1, 6), "B2": (7, 12), "B3": (13, 18), "B4": (19, 24)}
 
 
+def rear_sensor_for_meter():
+    """Which rear irradiance channel belongs to which meter.
+
+    Each block runs Front A, four rear sensors, Front B, so the nth panel in a
+    block pairs with the nth rear sensor. ASSUMED from the numbering rather
+    than confirmed against the wiring -- if a per-panel irradiance figure ever
+    looks wrong, check this first.
+    """
+    blocks = [("B1", [11, 12, 13, 14]), ("B2", [15, 16, 17, 18]),
+              ("B3", [19, 20, 21, 22]), ("B4", [23, 24, 25, 26])]
+    out = {}
+    for blk, meters in blocks:
+        fa, _fb = FRONT_BY_BLOCK.get(blk, (None, None))
+        if fa is None:
+            continue
+        for i, m in enumerate(meters):
+            out[m] = fa + 1 + i
+    return out
+
+
 def split_irradiance(df_live):
     """Average front and rear irradiance separately.
 
@@ -686,7 +706,8 @@ def split_irradiance(df_live):
             float(np.mean(rv)) if rv else float("nan"), len(fv), len(rv))
 
 
-def array_diagram(values=None, unit="W", title="Live array", front=None):
+def array_diagram(values=None, unit="W", title="Live array", front=None,
+                  rear=None):
     """A plan view of the roof, each panel lit by what it is producing.
 
     Four blocks of four bifacial panels, each block bracketed by its two front
@@ -701,6 +722,17 @@ def array_diagram(values=None, unit="W", title="Live array", front=None):
     values = values or {}
     blocks = [("B1", [11, 12, 13, 14]), ("B2", [15, 16, 17, 18]),
               ("B3", [19, 20, 21, 22]), ("B4", [23, 24, 25, 26])]
+
+    # Each block's rear sensors sit between its two front references, so the
+    # nth panel pairs with the nth rear sensor. ASSUMED, not confirmed against
+    # the physical wiring -- worth checking before trusting a per-panel figure.
+    REAR_BY_METER = {}
+    for _blk, _meters in blocks:
+        _fa, _fb = FRONT_BY_BLOCK.get(_blk, (None, None))
+        if _fa is None:
+            continue
+        for _i, _m in enumerate(_meters):
+            REAR_BY_METER[_m] = _fa + 1 + _i
 
     live = [v for v in values.values() if isinstance(v, (int, float)) and v == v]
     peak = max(live) if live else 0.0
@@ -737,10 +769,10 @@ def array_diagram(values=None, unit="W", title="Live array", front=None):
         return ("#%02X%02X%02X" % rgb, "#F2A03D" if f > 0.6 else "#5C7086",
                 0.55 + 0.45 * f)
 
-    W, H = 980, 330
+    W, H = 980, 386
     pad_x, pad_y = 108, 74      # room for the block label and its sensor ring
     row_h = (H - pad_y - 26) / 4
-    panel_w, panel_h = 168, row_h - 20
+    panel_w, panel_h = 168, row_h - 16
     parts = [f'<svg viewBox="0 0 {W} {H}" xmlns="http://www.w3.org/2000/svg" '
              f'role="img" aria-label="{title}: 16 bifacial panels in four rows">']
     parts.append('<defs><filter id="glow" x="-40%" y="-40%" width="180%" height="180%">'
@@ -797,14 +829,29 @@ def array_diagram(values=None, unit="W", title="Live array", front=None):
                              f'font-family="IBM Plex Mono, monospace" font-size="15" '
                              f'font-weight="600">no reading</text>')
             else:
-                parts.append(f'<text x="{x + panel_w/2 - 6}" y="{y + panel_h/2 + 5}" '
+                parts.append(f'<text x="{x + panel_w/2 - 6}" y="{y + panel_h/2 - 2}" '
                              f'text-anchor="middle" fill="#FFFFFF" '
                              f'font-family="IBM Plex Mono, monospace" font-size="16" '
                              f'font-weight="600" opacity="0.96">{v:,.0f}</text>')
-                parts.append(f'<text x="{x + panel_w/2 + 22}" y="{y + panel_h/2 + 5}" '
+                parts.append(f'<text x="{x + panel_w/2 + 22}" y="{y + panel_h/2 - 2}" '
                              f'fill="#FFFFFF" opacity="0.6" '
                              f'font-family="IBM Plex Mono, monospace" '
                              f'font-size="11">{unit}</text>')
+
+            # Rear irradiance for this panel, underneath its output. Kept in the
+            # front-sensor amber so the eye ties the two together, and dimmer
+            # than the power figure so the panel still reads power-first.
+            rv = (rear or {}).get(dev)
+            if isinstance(rv, (int, float)) and rv == rv:
+                parts.append(f'<text x="{x + panel_w/2}" y="{y + panel_h - 7}" '
+                             f'text-anchor="middle" fill="#FFE0B2" opacity="0.85" '
+                             f'font-family="IBM Plex Mono, monospace" '
+                             f'font-size="11">{rv:,.0f} W/m&#178; rear</text>')
+            elif rear is not None:
+                parts.append(f'<text x="{x + panel_w/2}" y="{y + panel_h - 7}" '
+                             f'text-anchor="middle" fill="#7B8B99" opacity="0.7" '
+                             f'font-family="IBM Plex Mono, monospace" '
+                             f'font-size="11">rear sensor silent</text>')
             parts.append(f'<text x="{x + 8}" y="{y + 15}" fill="#8FA0AE" '
                          f'font-family="IBM Plex Mono, monospace" font-size="10">{dev}</text>')
 

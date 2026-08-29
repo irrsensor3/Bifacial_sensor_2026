@@ -6,6 +6,7 @@ from ui_sections import (
     inject_theme,
     solar_day_bar,
     split_irradiance,
+    rear_sensor_for_meter,
     hero,
     feature_cards,
     array_diagram,
@@ -180,8 +181,21 @@ def render_overview(expanded: bool):
                 if pd.notna(v):
                     front[sid] = float(v)
 
+    # Rear irradiance per panel, so each cell shows what the panel is making
+    # AND the light reaching its back face -- the two numbers that together
+    # explain bifacial performance.
+    rear = {}
+    if not df_live.empty:
+        last = df_live.iloc[-1]
+        for meter, sensor in rear_sensor_for_meter().items():
+            col = f"Irr_{sensor}"
+            if col in df_live.columns:
+                v = pd.to_numeric(last.get(col), errors="coerce")
+                if pd.notna(v):
+                    rear[meter] = float(v)
+
     array_diagram(power, unit="W", title="Live output, panel by panel",
-                  front=front)
+                  front=front, rear=rear)
 
     if df_live.empty:
         feature_cards([
