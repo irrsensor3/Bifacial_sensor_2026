@@ -727,11 +727,33 @@ def render_live_monitoring():
             format_func=lambda d: f"Meter {int(d)}",
             label_visibility="collapsed",
         )
-        metric_choice = st.radio(
-            "Metric", ["voltage_v", "current_a", "active_power_kw"],
-            format_func=lambda m: {"voltage_v": "Voltage (V)", "current_a": "Current (A)", "active_power_kw": "Power (kW)"}[m],
-            horizontal=True,
-        )
+        # A segmented control rather than a radio: it reads as a row of tabs,
+        # but selects one value, so only the chosen chart is built. st.tabs
+        # renders every tab body, which would draw four charts on every refresh
+        # tick and throw three away.
+        METRICS = {"Current (A)": "current_a",
+                   "Voltage (V)": "voltage_v",
+                   "Power (kW)": "active_power_kw",
+                   "Energy (kWh)": "forward_energy_kwh"}
+        labels = list(METRICS)
+        if hasattr(st, "segmented_control"):
+            picked = st.segmented_control(
+                "Metric", labels, default=labels[0], key="meter_metric_pick")
+        else:
+            # Older Streamlit: same choice, plainer control.
+            picked = st.radio("Metric", labels, horizontal=True,
+                              key="meter_metric_pick")
+        metric_choice = METRICS.get(picked or labels[0], "current_a")
+
+        # Trend answers "what is it doing now", distribution answers "what does
+        # it usually do" -- the same numbers, two different questions, so the
+        # view is a switch rather than a separate page.
+        view = st.segmented_control(
+            "View", ["Trend over time", "Distribution"],
+            default="Trend over time", key="meter_view") \
+            if hasattr(st, "segmented_control") else \
+            st.radio("View", ["Trend over time", "Distribution"],
+                     horizontal=True, key="meter_view")
 
         if selected_devices:
             pivot = df_panel_combined[df_panel_combined["device_id"].isin(selected_devices)].pivot_table(
@@ -758,7 +780,35 @@ def render_live_monitoring():
 
             metric_axis_label = {
                 "voltage_v": "Voltage (V)", "current_a": "Current (A)", "active_power_kw": "Power (kW)",
-            }[metric_choice]
+            }.get(metric_choice, "Energy (kWh)")
+
+            if view == "Distribution":
+                # Same numbers, different question. The trend says what a meter
+                # is doing now; the distribution says what it usually does, so a
+                # meter sitting left of the others is consistently low rather
+                # than momentarily low.
+                import plotly.graph_objects as _go
+                hist = _go.Figure()
+                for c in meter_cols:
+                    vals = pd.to_numeric(pivot_reset[c], errors="coerce").dropna()
+                    if len(vals):
+                        hist.add_trace(_go.Histogram(x=vals, name=str(c),
+                                                     opacity=0.55, nbinsx=40))
+                hist.update_layout(
+                    barmode="overlay", height=430,
+                    margin=dict(l=10, r=10, t=30, b=10),
+                    paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                    font={"family": "Manrope, sans-serif", "color": "#0F1B2A"},
+                    xaxis={"title": metric_axis_label, "gridcolor": "#E3E9EF"},
+                    yaxis={"title": "Number of readings", "gridcolor": "#E3E9EF"},
+                    legend={"font": {"size": 11}},
+                )
+                st.plotly_chart(hist, use_container_width=True)
+                st.caption(
+                    f"How often each meter sat at each {metric_axis_label} "
+                    f"over the period shown."
+                )
+                return
 
             dcm_fig = plot_line_chart(
                 pivot_reset, "created_at", meter_cols,
