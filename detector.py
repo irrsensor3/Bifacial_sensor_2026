@@ -1508,6 +1508,171 @@ def detect_out_of_bounds(grid, found, day_label):
 #  PERSISTENCE
 # =============================================================================
 
+# Front reference sensors per block, from the Pi's channel numbering: each row
+# runs Front A, four rear sensors, Front B. Everything between the pair is
+# rear-facing.
+FRONT_BY_BLOCK = {"B1": (1, 6), "B2": (7, 12), "B3": (13, 18), "B4": (19, 24)}
+
+
+# =============================================================================
+#  MODULE SPECIFICATION  —  Trina Solar TSM-645DEG21C.20
+# =============================================================================
+#  From the label on the back of a panel, plus the temperature coefficients
+#  from the Vertex DEG21C.20 datasheet. Change these if the modules change.
+MODULE = {
+    "pmax": 645.0,        # W at STC
+    "vmp": 37.5,          # V
+    "imp": 17.23,         # A
+    "voc": 45.3,          # V
+    "isc": 18.31,         # A
+    "gamma_pmax": -0.0034,   # per degree C  (-0.34 %/C)
+    "beta_voc": -0.0025,     # per degree C  (-0.25 %/C)
+    "noct": 43.0,         # C, cell temp at 800 W/m2 / 20 C ambient / 1 m/s
+    "bifaciality": 0.70,  # rear face converts 70% as well as the front
+}
+
+# Performance ratio = measured power / power the module should make in the
+# light and temperature it is actually sitting in. A healthy rooftop module
+# lands around 0.80-0.95 once wiring, mismatch and soiling are counted.
+PR_LOW = 0.70                 # below this, something is wrong
+PR_MIN_IRRADIANCE = 300.0     # W/m2 — PR is meaningless in dim light
+PR_MIN_SAMPLES = 60
+
+
+def expected_power(irradiance, cell_temp_c, module=MODULE):
+    """What one module should produce, given light and temperature.
+
+    Linear in irradiance and linear in temperature about STC. Good to a few
+    percent across normal operating conditions, which is well inside the
+    tolerance that matters for spotting a fault.
+    """
+    g = np.asarray(irradiance, dtype=float) / 1000.0
+    t = np.asarray(cell_temp_c, dtype=float)
+    return module["pmax"] * g * (1.0 + module["gamma_pmax"] * (t - 25.0))
+
+
+def _effective_irradiance(grid, found, module=MODULE):
+    """Front irradiance plus the rear contribution, weighted by bifaciality.
+
+    A bifacial module is not lit by its front face alone -- ignoring the rear
+    would understate expected power and make every panel look like it is
+    over-performing.
+    """
+    cols = found.get("Irr", {})
+    if not cols:
+        return None
+    fronts = [c for pair in FRONT_BY_BLOCK.values() for c in pair]
+    f = [cols[p] for p in cols if p in fronts]
+    r = [cols[p] for p in cols if p not in fronts]
+    if not f:
+        return None
+    front = pd.DataFrame({c: pd.to_numeric(grid[c], errors="coerce")
+                          for c in f}).mean(axis=1)
+    if not r:
+        return front
+    rear = pd.DataFrame({c: pd.to_numeric(grid[c], errors="coerce")
+                         for c in r}).mean(axis=1)
+    return front + module["bifaciality"] * rear.fillna(0.0)
+
+
+def detect_mppt_mismatch(grid, found, day_label, module=MODULE):
+    """Panels operating below the power the conditions should give them.
+
+    Two findings, and they answer different questions:
+
+      per-panel  -- one module's performance ratio adrift from its peers.
+                    Points at that module: soiling, a cell fault, a bad
+                    connection, or an inverter port not tracking properly.
+
+      array-wide -- every module low together. Points at something shared:
+                    dirt across the roof, a wiring loss, or the modules
+                    genuinely degrading.
+
+    Needs irradiance, so it is silent until the Pi is reporting. Falls back to
+    ambient temperature where module temperature is missing, which biases the
+    expected figure high -- so the check errs towards NOT flagging.
+    """
+    out = []
+    if "P" not in found and "I" not in found:
+        return out
+
+    eff = _effective_irradiance(grid, found, module)
+    if eff is None:
+        return out
+
+    # Module temperature, else ambient, else an NOCT-based estimate.
+    tcols = found.get("Temp", {})
+    if tcols:
+        tcell = pd.DataFrame({c: pd.to_numeric(grid[c], errors="coerce")
+                              for c in tcols.values()}).mean(axis=1)
+    else:
+        tcell = pd.Series(25.0 + (module["noct"] - 20.0) * eff / 800.0,
+                          index=grid.index)
+
+    bright = (eff > PR_MIN_IRRADIANCE) & tcell.notna()
+    if bright.sum() < PR_MIN_SAMPLES:
+        return out
+
+    exp_w = pd.Series(expected_power(eff, tcell, module), index=grid.index)
+
+    pcols = found.get("P", {})
+    icols = found.get("I", {})
+    vcols = found.get("V", {})
+
+    ratios = {}
+    for dev in (pcols or icols):
+        if pcols:
+            meas = pd.to_numeric(grid[pcols[dev]], errors="coerce") * 1000.0
+        elif dev in vcols:
+            meas = (pd.to_numeric(grid[icols[dev]], errors="coerce")
+                    * pd.to_numeric(grid[vcols[dev]], errors="coerce"))
+        else:
+            continue
+        ok = bright & meas.notna() & (exp_w > 0)
+        if ok.sum() < PR_MIN_SAMPLES:
+            continue
+        ratios[dev] = float((meas[ok] / exp_w[ok]).median())
+
+    if not ratios:
+        return out
+
+    vals = np.array(list(ratios.values()))
+    centre = float(np.median(vals))
+    mad = float(np.median(np.abs(vals - centre)))
+    spread = mad * 1.4826 if mad > 0 else float(np.std(vals))
+
+    # One panel adrift from the rest
+    if spread > 0:
+        for dev, pr in ratios.items():
+            z = (pr - centre) / spread
+            pct = 100 * (pr / centre - 1) if centre else 0.0
+            if z > -SIGMA_WARN or abs(pct) < MIN_PCT_DEVIATION:
+                continue
+            out.append({
+                "type": "mppt_mismatch", "panel": dev, "day": day_label,
+                "performance_ratio": round(pr, 3),
+                "peer_median_ratio": round(centre, 3),
+                "pct_below_peers": round(-pct, 1), "sigma": round(z, 1),
+                "severity": "high" if z <= -SIGMA_FLAG else "medium",
+                "detail": (f"panel {dev} made {100*pr:.0f}% of the power its "
+                           f"light and temperature should give, against "
+                           f"{100*centre:.0f}% for its peers ({pct:+.1f}%)"),
+            })
+
+    # Everything low together
+    if centre < PR_LOW:
+        out.append({
+            "type": "mppt_mismatch", "subtype": "array_wide", "day": day_label,
+            "performance_ratio": round(centre, 3),
+            "severity": "high" if centre < 0.6 else "medium",
+            "detail": (f"the whole array averaged {100*centre:.0f}% of expected "
+                       f"power — below the {100*PR_LOW:.0f}% a healthy rooftop "
+                       f"module should manage, so this is shared: soiling, a "
+                       f"wiring loss, or degradation rather than one panel"),
+        })
+    return out
+
+
 def require_persistence(findings, min_days=PERSIST_DAYS):
     """Collapse per-day findings, and drop anything that happened once.
 
@@ -1629,6 +1794,7 @@ def run_on_frame(wide, interval_s=None):
         findings += detect_nocturnal_offset(chunk, found, day_label)
         findings += detect_sensor_flatlining(chunk, found, day_label, interval_s)
         findings += detect_out_of_bounds(chunk, found, day_label)
+        findings += detect_mppt_mismatch(chunk, found, day_label)
 
     return require_persistence(findings)
 
@@ -1678,6 +1844,7 @@ def run(data_root=None, out_dir=None, push=False):
         findings += detect_nocturnal_offset(chunk, found, label)
         findings += detect_current_flickering(chunk, found, label)
         findings += detect_out_of_bounds(chunk, found, label)
+        findings += detect_mppt_mismatch(chunk, found, label)
 
     confirmed, provisional = require_persistence(findings)
 

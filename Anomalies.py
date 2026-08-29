@@ -31,6 +31,10 @@ SEVERITY_STYLE = {
 }
 
 FAULT_EXPLAIN = {
+    "mppt_mismatch": "Producing less power than the light and temperature it is "
+                     "sitting in should give, measured against the Trina 645 W "
+                     "datasheet. One panel adrift points at that module; the "
+                     "whole array low points at soiling or wiring.",
     "branch_diode": "Current far below peers while voltage stayed normal — the "
                     "signature of a failed Y-connector diode.",
     "diode": "Voltage at about a third or two thirds of peers while current kept "
