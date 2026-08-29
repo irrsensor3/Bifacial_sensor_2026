@@ -803,7 +803,7 @@ def array_diagram(values=None, unit="W", title="Live array", front=None,
                 parts.append(f'<text x="{cx}" y="{y + panel_h/2 + 23}" '
                              f'text-anchor="middle" fill="#F2A03D" '
                              f'font-family="IBM Plex Mono, monospace" '
-                             f'font-size="10">{fv:,.0f} W/m&#178;</text>')
+                             f'font-size="10">{max(fv, 0):,.0f} W/m&#178;</text>')
             else:
                 parts.append(f'<circle cx="{cx}" cy="{y + panel_h/2}" r="2.5" '
                              f'fill="#F2A03D" opacity="0.5"/>')
@@ -844,14 +844,17 @@ def array_diagram(values=None, unit="W", title="Live array", front=None,
             rv = (rear or {}).get(dev)
             if isinstance(rv, (int, float)) and rv == rv:
                 parts.append(f'<text x="{x + panel_w/2}" y="{y + panel_h - 7}" '
-                             f'text-anchor="middle" fill="#FFE0B2" opacity="0.85" '
+                             f'text-anchor="middle" fill="#1A1005" opacity="0.78" '
                              f'font-family="IBM Plex Mono, monospace" '
-                             f'font-size="11">{rv:,.0f} W/m&#178; rear</text>')
+                             f'font-size="11" font-weight="500">{max(rv, 0):,.0f} W/m&#178; rear</text>')
             elif rear is not None:
+                # Dark text, because this label sits on whatever colour the
+                # panel happens to be -- pale grey vanished against a bright
+                # amber cell.
                 parts.append(f'<text x="{x + panel_w/2}" y="{y + panel_h - 7}" '
-                             f'text-anchor="middle" fill="#7B8B99" opacity="0.7" '
+                             f'text-anchor="middle" fill="#0C1620" opacity="0.55" '
                              f'font-family="IBM Plex Mono, monospace" '
-                             f'font-size="11">rear sensor silent</text>')
+                             f'font-size="11">no rear sensor</text>')
             parts.append(f'<text x="{x + 8}" y="{y + 15}" fill="#8FA0AE" '
                          f'font-family="IBM Plex Mono, monospace" font-size="10">{dev}</text>')
 
@@ -884,9 +887,12 @@ def array_diagram(values=None, unit="W", title="Live array", front=None,
                      f"shading from 0 to {peak:,.0f} {unit}"
     else:
         rng, scale_note = "no meter readings", "nothing to shade"
-    front_note = ("front sensors reporting" if (front and any(
-        isinstance(v, (int, float)) and v == v for v in front.values()))
-        else "front sensors not reporting")
+    n_front_live = sum(1 for v in (front or {}).values()
+                       if isinstance(v, (int, float)) and v == v)
+    n_rear_live = sum(1 for v in (rear or {}).values()
+                      if isinstance(v, (int, float)) and v == v)
+    front_note = (f"{n_front_live} of 8 front and {n_rear_live} of 16 rear "
+                  f"sensors reporting")
     parts.append(f'<text x="{pad_x}" y="{H-8}" fill="#6C7C8A" '
                  f'font-family="IBM Plex Mono, monospace" font-size="11">'
                  f'{rng} · {scale_note} · {front_note}</text>')
