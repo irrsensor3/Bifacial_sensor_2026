@@ -7,6 +7,7 @@ from ui_sections import (
     solar_day_bar,
     split_irradiance,
     rear_sensor_for_meter,
+    latest_per_column,
     hero,
     feature_cards,
     array_diagram,
@@ -171,28 +172,26 @@ def render_overview(expanded: bool):
     # Front reference sensors come from the Pi (Irr_1 .. Irr_24), not from the
     # meters. While that logger is silent the rings stay hollow rather than
     # showing zero -- "no sensor" and "no sunlight" must not look alike.
+    # Each sensor's own most recent reading, not the last row -- the logger
+    # leaves most cells in a row blank, so reading one row showed eight working
+    # sensors as one.
     front = {}
     if not df_live.empty:
-        last = df_live.iloc[-1]
-        for sid in (1, 6, 7, 12, 13, 18, 19, 24):
-            col = f"Irr_{sid}"
-            if col in df_live.columns:
-                v = pd.to_numeric(last.get(col), errors="coerce")
-                if pd.notna(v):
-                    front[sid] = float(v)
+        got = latest_per_column(df_live, [f"Irr_{s}" for s in
+                                          (1, 6, 7, 12, 13, 18, 19, 24)])
+        front = {int(k.split("_")[1]): v for k, v in got.items()}
 
     # Rear irradiance per panel, so each cell shows what the panel is making
     # AND the light reaching its back face -- the two numbers that together
     # explain bifacial performance.
     rear = {}
     if not df_live.empty:
-        last = df_live.iloc[-1]
-        for meter, sensor in rear_sensor_for_meter().items():
-            col = f"Irr_{sensor}"
-            if col in df_live.columns:
-                v = pd.to_numeric(last.get(col), errors="coerce")
-                if pd.notna(v):
-                    rear[meter] = float(v)
+        pairs = rear_sensor_for_meter()
+        got = latest_per_column(df_live, [f"Irr_{s}" for s in pairs.values()])
+        for meter, sensor in pairs.items():
+            v = got.get(f"Irr_{sensor}")
+            if v is not None:
+                rear[meter] = v
 
     array_diagram(power, unit="W", title="Live output, panel by panel",
                   front=front, rear=rear)

@@ -679,6 +679,25 @@ def rear_sensor_for_meter():
     return out
 
 
+def latest_per_column(df, cols):
+    """Most recent non-null value for each column.
+
+    The logger writes a row every few seconds but does not fill every sensor
+    in every row, so df.iloc[-1] is mostly blank -- reading it made eight
+    working sensors look like one. Take each column's own last reading.
+    """
+    out = {}
+    if df is None or df.empty:
+        return out
+    for c in cols:
+        if c not in df.columns:
+            continue
+        ser = pd.to_numeric(df[c], errors="coerce").dropna()
+        if len(ser):
+            out[c] = float(ser.iloc[-1])
+    return out
+
+
 def split_irradiance(df_live):
     """Average front and rear irradiance separately.
 
@@ -692,16 +711,13 @@ def split_irradiance(df_live):
     fronts = [c for pair in FRONT_BY_BLOCK.values() for c in pair]
     if df_live is None or df_live.empty:
         return float("nan"), float("nan"), 0, 0
-    row = df_live.iloc[-1]
+    latest = latest_per_column(df_live, [f"Irr_{c}" for c in range(1, 25)])
     fv, rv = [], []
     for ch in range(1, 25):
-        col = f"Irr_{ch}"
-        if col not in df_live.columns:
+        v = latest.get(f"Irr_{ch}")
+        if v is None:
             continue
-        v = pd.to_numeric(row.get(col), errors="coerce")
-        if pd.isna(v):
-            continue
-        (fv if ch in fronts else rv).append(float(v))
+        (fv if ch in fronts else rv).append(v)
     return (float(np.mean(fv)) if fv else float("nan"),
             float(np.mean(rv)) if rv else float("nan"), len(fv), len(rv))
 
