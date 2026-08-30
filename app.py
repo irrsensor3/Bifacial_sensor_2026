@@ -230,7 +230,7 @@ pages = [
 
 if st.session_state.user_role == "admin":
     pages.append(st.Page(render_admin_controls, title="Admin Controls", icon="🛠️"))
-     with st.sidebar.expander("Debug: fetch errors"):
+    with st.sidebar.expander("Debug: fetch errors"):
         for key in ("_fetch_error_system_logs", "_fetch_error_panel_readings"):
             st.code(st.session_state.get(key, "no error recorded"))
 
