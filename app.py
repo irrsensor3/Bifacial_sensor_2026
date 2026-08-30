@@ -14,6 +14,7 @@ from ui_sections import (
     plot_gauge,
     fetch_latest_readings,
     fetch_latest_panel_readings,
+    system_log_panel,
 )
 from Data_and_Reports import render_data_reports
 from Live_Monitoring import render_live_monitoring
@@ -55,7 +56,7 @@ if st.sidebar.button("Sign out", width="stretch"):
     st.session_state.user_role = None
     st.rerun()
 
-
+system_log_panel() 
 # -------------------------
 # Overview strip: live gauges + array photo.
 #
