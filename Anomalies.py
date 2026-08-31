@@ -61,9 +61,16 @@ def send_alert_email(subject: str, body: str) -> bool:
             missing.append("SMTP_PASSWORD")
 
         if missing:
-            st.error(
-                f"Missing Streamlit secrets: {', '.join(missing)}"
-            )
+            # Email alerting is optional. Warn once per session and carry on --
+            # this used to raise a red error for EVERY confirmed fault, so eight
+            # findings produced eight identical blocks and buried the results
+            # they were meant to accompany.
+            if not st.session_state.get("_smtp_warned"):
+                st.session_state["_smtp_warned"] = True
+                st.caption(
+                    f"Email alerts are off: no {' or '.join(missing)} in secrets. "
+                    f"Detection is unaffected."
+                )
             return False
 
         smtp_host = st.secrets.get("SMTP_HOST", "smtp.gmail.com")
@@ -88,7 +95,10 @@ def send_alert_email(subject: str, body: str) -> bool:
         return True
 
     except Exception as e:
-        st.error(f"Failed to send email alert: {e}")
+        # Same reasoning: a mail server problem must not bury the findings.
+        if not st.session_state.get("_smtp_error_shown"):
+            st.session_state["_smtp_error_shown"] = True
+            st.warning(f"Could not send the alert email: {e}")
         return False
 
 def fetch_panel_history(days: int, _progress=None) -> pd.DataFrame:
