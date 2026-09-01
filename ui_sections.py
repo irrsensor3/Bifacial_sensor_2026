@@ -49,7 +49,30 @@ _PBKDF2_ROUNDS = 200_000
 _LOCKOUT_AFTER = 5
 _LOCKOUT_SECONDS = 300
 
+@st.cache_data(ttl=5)
+def fetch_system_logs(limit=200):
+    rows = _safe_query("system_logs", limit, "system logs")
+    if not rows:
+        return pd.DataFrame()
+    df = pd.DataFrame(rows)
+    df["created_at"] = pd.to_datetime(df["created_at"], errors="coerce")
+    return df
 
+
+def system_log_panel(limit=200, height=260):
+    """Persistent system log viewer, shown in the sidebar. Call this once
+    from app.py: st.navigation reruns app.py's whole script on every page
+    switch, so one call there means this shows up on every page."""
+    df_logs = fetch_system_logs(limit=limit)
+    with st.sidebar.expander("System logs", expanded=False):
+        if df_logs.empty:
+            st.caption("No log entries yet.")
+            return
+        show_df = (
+            df_logs.sort_values("created_at", ascending=False)[["created_at", "message"]]
+        )
+        st.dataframe(show_df, use_container_width=True, hide_index=True, height=height)
+        
 def hash_password(password: str, salt: str) -> str:
     """PBKDF2 rather than a single SHA-256 pass. A plain hash of a short
     password is brute-forced in seconds on a laptop; 200k rounds makes each
