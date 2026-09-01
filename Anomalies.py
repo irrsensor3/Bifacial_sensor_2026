@@ -329,11 +329,19 @@ def render_anomalies():
 
     left, right = st.columns([1, 2])
     with left:
+        # max_value is deliberately above MAX_DAYS. Streamlit clamps to
+        # max_value before returning, so a larger request would arrive already
+        # reduced and there would be no way to tell the user it had been
+        # changed. Accepting it and bounding it here keeps the intent visible.
         days = st.number_input(
-            "Days to analyse", min_value=1, max_value=MAX_DAYS, value=3, step=1,
-            help="About 28,700 readings per day, fetched 1,000 at a time — "
-                 "roughly 15 seconds per day of data. Three days or more lets "
-                 "a finding be confirmed rather than left provisional.")
+            "Days to analyse", min_value=1, max_value=90, value=3, step=1,
+            help=f"About 28,700 readings per day, fetched 1,000 at a time — "
+                 f"roughly 15 seconds per day of data. Three days or more lets "
+                 f"a finding be confirmed rather than left provisional. "
+                 f"Requests above {MAX_DAYS} days are reduced to {MAX_DAYS}; "
+                 f"for longer periods run detector.py against CSV files.")
+        if int(days) > MAX_DAYS:
+            st.caption(f"Will analyse the most recent {MAX_DAYS} days.")
     with right:
         st.caption(" ")
         go = st.button("Run detection", type="primary", width="stretch")
