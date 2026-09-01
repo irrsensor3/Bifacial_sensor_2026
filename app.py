@@ -1,4 +1,5 @@
 import streamlit as st
+from datetime import datetime
 import pandas as pd
 
 from ui_sections import (
@@ -8,13 +9,13 @@ from ui_sections import (
     split_irradiance,
     rear_sensor_for_meter,
     latest_per_column,
+    SITE_ZONE,
     hero,
     feature_cards,
     array_diagram,
     plot_gauge,
     fetch_latest_readings,
     fetch_latest_panel_readings,
-    system_log_panel,
 )
 from Data_and_Reports import render_data_reports
 from Live_Monitoring import render_live_monitoring
@@ -55,7 +56,8 @@ if st.sidebar.button("Sign out", width="stretch"):
     st.session_state.auth = False
     st.session_state.user_role = None
     st.rerun()
- 
+
+
 # -------------------------
 # Overview strip: live gauges + array photo.
 #
@@ -129,12 +131,23 @@ def render_overview(expanded: bool):
                 .iloc[-1].notna().sum()
             )
 
+    # created_at is stored in UTC. Displayed raw it reads eight hours behind
+    # local time, so 14:05 at the array showed as 06:05 and looked like the
+    # logger had stopped hours ago.
     last_seen = "—"
     for frame in (df_live, df_panel):
         if not frame.empty and "created_at" in frame.columns:
-            stamp = pd.to_datetime(frame["created_at"], errors="coerce").max()
+            stamp = pd.to_datetime(frame["created_at"], errors="coerce",
+                                   utc=True).max()
             if pd.notna(stamp):
-                last_seen = stamp.strftime("%H:%M")
+                local = stamp.tz_convert(SITE_ZONE)
+                age_min = (datetime.now(SITE_ZONE) - local).total_seconds() / 60
+                last_seen = local.strftime("%H:%M")
+                # A timestamp alone does not say whether it is recent. Flag a
+                # stale one rather than presenting it as current.
+                if age_min > 15:
+                    last_seen += f"  ({age_min/60:.0f}h ago)" if age_min > 90 \
+                                 else f"  ({age_min:.0f}m ago)"
                 break
 
     hero(
@@ -198,7 +211,6 @@ def render_overview(expanded: bool):
 
     array_diagram(power, unit="W", title="Live output, panel by panel",
                   front=front, rear=rear)
-    system_log_panel() 
 
     if df_live.empty:
         feature_cards([
@@ -230,9 +242,6 @@ pages = [
 
 if st.session_state.user_role == "admin":
     pages.append(st.Page(render_admin_controls, title="Admin Controls", icon="🛠️"))
-    with st.sidebar.expander("Debug: fetch errors"):
-        for key in ("_fetch_error_system_logs", "_fetch_error_panel_readings"):
-            st.code(st.session_state.get(key, "no error recorded"))
 
 nav = st.navigation(pages)
 

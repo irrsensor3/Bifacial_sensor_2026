@@ -386,7 +386,10 @@ def render_anomalies():
                     "temperature faults could not be checked. Only the DC "
                     "meters were examined."
                 )
-            status.update(label=f"Checked {len(wide):,} samples",
+            # len(wide) counts timestamps after reshaping; the metric below
+            # counts them too. Reporting the raw row count here made the two
+            # disagree for no reason a reader could work out.
+            status.update(label=f"Checked {len(wide) + len(sensors):,} samples",
                           state="complete", expanded=False)
         st.session_state["_anom"] = (confirmed, provisional,
                                      len(wide) + len(sensors), int(days))
