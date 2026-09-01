@@ -60,11 +60,12 @@ def fetch_system_logs(limit=200):
 
 
 def system_log_panel(limit=200, height=260):
-    """Persistent system log viewer, shown in the sidebar. Call this once
-    from app.py: st.navigation reruns app.py's whole script on every page
-    switch, so one call there means this shows up on every page."""
+    """System log viewer. Call this once per page load — since app.py's
+    render_overview() runs on every page (st.navigation reruns the whole
+    script on page switch), placing the call there shows this on every page,
+    right under the live array diagram."""
     df_logs = fetch_system_logs(limit=limit)
-    with st.sidebar.expander("System logs", expanded=False):
+    with st.expander("System logs", expanded=False):
         if df_logs.empty:
             st.caption("No log entries yet.")
             return
