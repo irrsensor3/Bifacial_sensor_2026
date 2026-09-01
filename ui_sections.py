@@ -1565,6 +1565,11 @@ def _safe_query(table: str, limit: int, label: str):
         st.warning(f"Couldn't load {label} from the database. Showing nothing for now.")
         return []
 
+# Cached like the other two fetchers. Without the decorator this ran a fresh
+# database query on every rerun -- including every auto-refresh tick -- and,
+# more visibly, `.clear()` does not exist on an uncached function, so the
+# Refresh now button raised AttributeError and took the page down.
+@st.cache_data(ttl=5)
 def fetch_latest_readings(limit=50):
     rows = _safe_query("sensor_readings", limit, "sensor readings")
     if not rows:
@@ -1602,32 +1607,3 @@ def fetch_latest_panel_readings(limit=200):
     df_panel = pd.DataFrame(rows)
     df_panel = df_panel.sort_values("created_at")  # oldest -> newest for plotting
     return df_panel
-
-@st.cache_data(ttl=5)
-def fetch_system_logs(limit=200):
-    rows = _safe_query("system_logs", limit, "system logs")
-    if not rows:
-        return pd.DataFrame()
-    df = pd.DataFrame(rows)
-    # errors="coerce": one malformed timestamp shouldn't blank the whole panel
-    df["created_at"] = pd.to_datetime(df["created_at"], errors="coerce")
-    return df
-
-
-def system_log_panel(limit=200, height=260):
-    """Persistent system log viewer, shown in the sidebar. Call this once
-    from app.py (same reasoning as inject_theme()): st.navigation reruns
-    app.py's whole script on every page switch, so one call there means
-    this shows up on every page — Admin Controls, Anomalies, Live
-    Monitoring, all of them — without adding it per page."""
-    df_logs = fetch_system_logs(limit=limit)
-    with st.sidebar.expander("System logs", expanded=False):
-        if df_logs.empty:
-            st.caption("No log entries yet.")
-            return
-        show_df = (
-            df_logs.sort_values("created_at", ascending=False)[["created_at", "message"]]
-        )
-        st.dataframe(show_df, use_container_width=True, hide_index=True, height=height)
-
-    
