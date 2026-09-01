@@ -339,7 +339,17 @@ def render_anomalies():
         go = st.button("Run detection", type="primary", width="stretch")
 
     if go:
-        days = max(1, min(int(days), MAX_DAYS))   # bound it, whatever was typed
+        # Streamlit outlines the box in red for an out-of-range value but still
+        # hands it over, so bound it here. Say so as well: running 14 days when
+        # 60 was asked for, without a word, is worse than refusing.
+        requested = int(days)
+        days = max(1, min(requested, MAX_DAYS))
+        if requested != days:
+            st.info(
+                f"{requested} days was requested; analysing the most recent "
+                f"{days} instead, which is the maximum this page fetches in one "
+                f"pass."
+            )
         status = st.status(f"Reading the last {days} day(s)…", expanded=True)
         with status:
             note = st.empty()
