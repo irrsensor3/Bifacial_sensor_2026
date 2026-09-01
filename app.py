@@ -55,8 +55,7 @@ if st.sidebar.button("Sign out", width="stretch"):
     st.session_state.auth = False
     st.session_state.user_role = None
     st.rerun()
-
-system_log_panel() 
+ 
 # -------------------------
 # Overview strip: live gauges + array photo.
 #
@@ -199,6 +198,7 @@ def render_overview(expanded: bool):
 
     array_diagram(power, unit="W", title="Live output, panel by panel",
                   front=front, rear=rear)
+    system_log_panel() 
 
     if df_live.empty:
         feature_cards([
