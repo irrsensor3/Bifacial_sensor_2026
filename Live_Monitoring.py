@@ -419,9 +419,15 @@ def render_live_monitoring():
         # Clear only the live-reading caches, not the hour(s)-long Drive
         # download cache — a manual refresh shouldn't force everyone's
         # already-appended historical data to re-download from Drive.
-        fetch_latest_readings.clear()
-        fetch_recent_alerts.clear()
-        fetch_latest_panel_readings.clear()
+        # Clear whichever of these are cached. Calling .clear() directly raises
+        # AttributeError on an uncached function, which took the whole page down
+        # when one of the three lost its decorator -- a refresh button should
+        # never be able to do that.
+        for _fn in (fetch_latest_readings, fetch_recent_alerts,
+                    fetch_latest_panel_readings):
+            clear = getattr(_fn, "clear", None)
+            if callable(clear):
+                clear()
         st.rerun()
 
     run_every = refresh_seconds if auto_refresh else None
