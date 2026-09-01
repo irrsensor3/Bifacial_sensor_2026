@@ -21,6 +21,10 @@ from email.mime.multipart import MIMEMultipart
 #
 # A minute of resolution is ample for detection: it gives 1,433 samples per
 # panel per day against the 200 the checks require.
+# Typing a number into st.number_input can exceed max_value before it is
+# clamped, so the value is bounded again below rather than trusted here.
+MAX_DAYS = 14
+
 PAGE_SIZE = 1000
 MAX_ROWS = 400_000          # hard ceiling, whatever the period asks for
 
@@ -101,7 +105,7 @@ def send_alert_email(subject: str, body: str) -> bool:
             st.warning(f"Could not send the alert email: {e}")
         return False
 
-def fetch_panel_history(days: int, _progress=None) -> pd.DataFrame:
+def fetch_panel_history(days: int):
     """Pull recent panel_readings and reshape to the wide layout the detector
     expects.
 
@@ -109,8 +113,13 @@ def fetch_panel_history(days: int, _progress=None) -> pd.DataFrame:
     most useful rows arrive first and a truncated fetch still covers the recent
     period rather than an arbitrary slice of the past.
     """
+    # Returns (frame, error_message). A cached function must not write to the
+    # screen: on a cache hit Streamlit replays whatever the function displayed,
+    # and any reference to a screen element from the earlier run is gone by
+    # then, which raises CacheReplayClosureError. Errors are therefore returned
+    # for the caller to display.
     since = pd.Timestamp.utcnow().tz_localize(None) - pd.Timedelta(days=days)
-    rows, cursor, guard = [], None, 0
+    rows, cursor, guard, err = [], None, 0, None
 
     # Page by timestamp, not by offset.
     #
@@ -134,13 +143,11 @@ def fetch_panel_history(days: int, _progress=None) -> pd.DataFrame:
         try:
             batch = q.execute().data or []
         except Exception as exc:
-            st.error(f"Couldn't read panel_readings: {exc}")
+            err = f"Couldn't read panel_readings: {exc}"
             break
         if not batch:
             break
         rows.extend(batch)
-        if _progress is not None:
-            _progress(len(rows))
 
         newest = max(r.get("created_at") for r in batch)
         nxt = pd.to_datetime(newest, errors="coerce", utc=True)
@@ -155,13 +162,12 @@ def fetch_panel_history(days: int, _progress=None) -> pd.DataFrame:
             break
 
     if not rows:
-        return pd.DataFrame()
+        return pd.DataFrame(), err
 
     # Report what was actually retrieved. A short fetch looks exactly like a
     # logger outage once the rows are gridded -- missing rows become missing
     # minutes -- so the two have to be told apart before any finding about
     # "missing samples" can be trusted.
-    st.session_state["_fetch_rows"] = len(rows)
 
     d = pd.DataFrame(rows)
     d["ts"] = pd.to_datetime(d["created_at"], errors="coerce", utc=True).dt.tz_localize(None)
@@ -193,7 +199,7 @@ def fetch_panel_history(days: int, _progress=None) -> pd.DataFrame:
 
     n_cycles = int(d["cycle"].nunique())
     span = (d.ts.max() - d.ts.min()).total_seconds()
-    st.session_state["_fetch_cadence"] = round(span / max(n_cycles, 1), 1)
+    cadence = round(span / max(n_cycles, 1), 1)
 
     frames = []
     for src, short in (("voltage_v", "V"), ("current_a", "I"),
@@ -206,15 +212,16 @@ def fetch_panel_history(days: int, _progress=None) -> pd.DataFrame:
         wide.columns = [f"{short}_{int(c)}" for c in wide.columns]
         frames.append(wide)
     if not frames:
-        return pd.DataFrame()
+        return pd.DataFrame(), err
     out = pd.concat(frames, axis=1).sort_index()
     out = out[~out.index.duplicated(keep="last")]
     out.index.name = "Timestamp"
-    return out
+    out.attrs["cadence_s"] = cadence      # carried on the frame, not in session
+    return out, err
 
 
 @st.cache_data(ttl=300, show_spinner=False)
-def fetch_sensor_history(days: int, _progress=None) -> pd.DataFrame:
+def fetch_sensor_history(days: int):
     """Pull recent sensor_readings — irradiance and module temperature.
 
     The page checked panel_readings only, so every temperature and irradiance
@@ -225,8 +232,13 @@ def fetch_sensor_history(days: int, _progress=None) -> pd.DataFrame:
     Temp_1..Temp_24 inside, so they expand straight into the wide layout the
     detector wants -- no pivot needed, unlike the meters.
     """
+    # Returns (frame, error_message). A cached function must not write to the
+    # screen: on a cache hit Streamlit replays whatever the function displayed,
+    # and any reference to a screen element from the earlier run is gone by
+    # then, which raises CacheReplayClosureError. Errors are therefore returned
+    # for the caller to display.
     since = pd.Timestamp.utcnow().tz_localize(None) - pd.Timedelta(days=days)
-    rows, cursor, guard = [], None, 0
+    rows, cursor, guard, err = [], None, 0, None
     while len(rows) < MAX_ROWS and guard < 2000:
         guard += 1
         q = (supabase.table("sensor_readings")
@@ -238,13 +250,11 @@ def fetch_sensor_history(days: int, _progress=None) -> pd.DataFrame:
         try:
             batch = q.execute().data or []
         except Exception as exc:
-            st.warning(f"Couldn't read sensor_readings: {exc}")
+            err = f"Couldn't read sensor_readings: {exc}"
             break
         if not batch:
             break
         rows.extend(batch)
-        if _progress is not None:
-            _progress(len(rows))
         nxt = pd.to_datetime(max(r.get("created_at") for r in batch),
                              errors="coerce", utc=True)
         if pd.isna(nxt):
@@ -257,7 +267,7 @@ def fetch_sensor_history(days: int, _progress=None) -> pd.DataFrame:
             break
 
     if not rows:
-        return pd.DataFrame()
+        return pd.DataFrame(), err
 
     flat = []
     for r in rows:
@@ -278,7 +288,7 @@ def fetch_sensor_history(days: int, _progress=None) -> pd.DataFrame:
     d = d[d.ts.notna()].drop(columns=["created_at"]).set_index("ts").sort_index()
     d = d[~d.index.duplicated(keep="last")]
     d.index.name = "Timestamp"
-    return d.apply(pd.to_numeric, errors="coerce")
+    return d.apply(pd.to_numeric, errors="coerce"), err
 
 
 def _render_findings(records, empty_message):
@@ -320,7 +330,7 @@ def render_anomalies():
     left, right = st.columns([1, 2])
     with left:
         days = st.number_input(
-            "Days to analyse", 1, 14, 3,
+            "Days to analyse", min_value=1, max_value=MAX_DAYS, value=3, step=1,
             help="About 28,700 readings per day, fetched 1,000 at a time — "
                  "roughly 15 seconds per day of data. Three days or more lets "
                  "a finding be confirmed rather than left provisional.")
@@ -329,17 +339,20 @@ def render_anomalies():
         go = st.button("Run detection", type="primary", width="stretch")
 
     if go:
+        days = max(1, min(int(days), MAX_DAYS))   # bound it, whatever was typed
         status = st.status(f"Reading the last {days} day(s)…", expanded=True)
         with status:
             note = st.empty()
             note.write("Fetching from the database in pages of 1,000…")
 
-            def tick(n):
-                note.write(f"Fetched {n:,} readings…")
-
-            wide = fetch_panel_history(int(days), _progress=tick)
+            wide, meter_err = fetch_panel_history(int(days))
+            if meter_err:
+                st.error(meter_err)
             note.write(f"Fetched {len(wide):,} meter samples. Reading sensors…")
-            sensors = fetch_sensor_history(int(days), _progress=tick)
+            st.session_state["_fetch_cadence"] = wide.attrs.get("cadence_s")
+            sensors, sensor_err = fetch_sensor_history(int(days))
+            if sensor_err:
+                st.warning(sensor_err)
             note.write(
                 f"{len(wide):,} meter samples, {len(sensors):,} sensor samples. "
                 f"Checking every panel…")
