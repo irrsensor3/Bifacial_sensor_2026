@@ -156,11 +156,14 @@ def _find_all_csvs_recursive(service, root_folder_id):
                 ):
                     continue
 
-                # Month must be 01-12
-                if not month_part.isdigit():
+                # Allow month folder names that are 1 or 2 digit numbers
+                # (e.g. "8" or "08"). Be explicit about the pattern so
+                # single-digit folders are accepted reliably.
+                m = str(month_part).strip()
+                if not re.match(r"^\d{1,2}$", m):
                     continue
 
-                month_number = int(month_part)
+                month_number = int(m)
 
                 if 1 <= month_number <= 12:
                     valid_year_month = True
@@ -541,8 +544,8 @@ def _download_single_dcm_csv_cached(
     Cache individual DC meter CSV files.
     """
     return download_dcm_csv_as_df(file_id)
-
-
+ 
+ 
 def download_and_combine_dcm_csvs(file_entries: tuple) -> pd.DataFrame:
     """
     Download and combine requested DC meter CSVs.
