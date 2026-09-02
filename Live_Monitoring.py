@@ -45,22 +45,26 @@ def st_autorefresh_builtin(seconds: int):
 
 
 def _irr_build_created_at(df: pd.DataFrame) -> pd.DataFrame:
-    """The irradiance CSVs ship separate Date/Time columns rather than a
-    single timestamp. Build `created_at` from them so historical rows can be
-    trimmed to an exact date range and merged onto the live chart's x-axis,
-    same as the DC meter CSVs (which already carry `created_at` once
-    download_and_combine_dcm_csvs standardizes them)."""
     df = df.copy()
     if "Date" in df.columns and "Time" in df.columns:
-        df["created_at"] = pd.to_datetime(
+        naive = pd.to_datetime(
             df["Date"].astype(str) + " " + df["Time"].astype(str), errors="coerce"
         )
+        df["created_at"] = (
+            naive.dt.tz_localize("Asia/Kuala_Lumpur", ambiguous="NaT", nonexistent="NaT")
+                 .dt.tz_convert("UTC")
+                 .dt.tz_localize(None)
+        )
     elif "Time" in df.columns:
-        df["created_at"] = pd.to_datetime(df["Time"], errors="coerce")
+        naive = pd.to_datetime(df["Time"], errors="coerce")
+        df["created_at"] = (
+            naive.dt.tz_localize("Asia/Kuala_Lumpur", ambiguous="NaT", nonexistent="NaT")
+                 .dt.tz_convert("UTC")
+                 .dt.tz_localize(None)
+        )
     else:
         df["created_at"] = pd.NaT
     return df
-
 
 def _load_range(period_files, download_fn, build_created_at, start_date, end_date):
     """Downloads+combines the given Drive files and trims to exactly
