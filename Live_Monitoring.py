@@ -74,25 +74,28 @@ def _load_range(period_files, download_fn, build_created_at, start_date, end_dat
     df_hist = download_fn(file_entries)
     if build_created_at is not None:
         df_hist = build_created_at(df_hist)
+    # inside _load_range, replace the existing "if 'created_at' in df_hist.columns:" block
     if "created_at" in df_hist.columns:
-        ca = (
-            pd.to_datetime(
-                df_hist["created_at"],
-                errors="coerce",
-                utc=True,
-            )
-            .dt.tz_convert("Asia/Kuala_Lumpur")
-            .dt.tz_localize(None)
-        )
+        # Parse created_at as UTC-aware timestamps (works whether values are naive UTC strings
+        # or tz-aware UTC). We'll do comparisons in UTC to avoid ambiguity.
+        ca_utc = pd.to_datetime(df_hist["created_at"], errors="coerce", utc=True)
     
-        day_after_end = pd.Timestamp(end_date) + pd.Timedelta(days=1)
+        # Build timezone-aware boundaries for the requested start/end in the local tz,
+        # then convert to UTC for comparison against ca_utc.
+        LOCAL_TZ = "Asia/Kuala_Lumpur"
+        start_local = pd.Timestamp(start_date, tz=LOCAL_TZ)
+        day_after_end_local = pd.Timestamp(end_date, tz=LOCAL_TZ) + pd.Timedelta(days=1)
     
-        df_hist = df_hist[
-            (ca >= pd.Timestamp(start_date)) &
-            (ca < day_after_end)
-        ].copy()
+        start_utc = start_local.tz_convert("UTC")
+        day_after_end_utc = day_after_end_local.tz_convert("UTC")
     
-        df_hist["created_at"] = ca.loc[df_hist.index]
+        # Filter using UTC-aware comparisons
+        mask = (ca_utc >= start_utc) & (ca_utc < day_after_end_utc)
+        df_hist = df_hist.loc[mask].copy()
+    
+        # For downstream code / plotting the app expects timezone-naive local times.
+        # Convert the kept UTC timestamps into local timezone then drop tz info.
+        df_hist["created_at"] = ca_utc.loc[df_hist.index].dt.tz_convert(LOCAL_TZ).dt.tz_localize(None)
         
     return df_hist
 
