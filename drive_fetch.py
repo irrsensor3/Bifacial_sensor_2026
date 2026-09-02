@@ -506,7 +506,7 @@ def _standardize_dcm_columns(df: pd.DataFrame) -> pd.DataFrame:
     df = df.rename(columns=rename_map)
 
     if "created_at" in df.columns:
-
+        naive = pd.to_datetime(df["created_at"], errors="coerce")
         # Parse timestamps and normalize them to UTC.
         df["created_at"] = pd.to_datetime(
             df["created_at"],
