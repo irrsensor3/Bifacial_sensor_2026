@@ -81,6 +81,7 @@ def _load_range(period_files, download_fn, build_created_at, start_date, end_dat
                 errors="coerce",
                 utc=True,
             )
+            .dt.tz_convert("Asia/Kuala_Lumpur")
             .dt.tz_localize(None)
         )
     
@@ -510,6 +511,7 @@ def render_live_monitoring():
                     errors="coerce",
                     utc=True,
                 )
+                .dt.tz_convert("Asia/Kuala_Lumpur")
                 .dt.tz_localize(None)
             )
             
@@ -529,6 +531,7 @@ def render_live_monitoring():
                         errors="coerce",
                         utc=True,
                     )
+                    .dt.tz_convert("Asia/Kuala_Lumpur")
                     .dt.tz_localize(None)
                 )
             
@@ -694,11 +697,11 @@ def render_live_monitoring():
             # ---------------------------------------------------------
             hist_slice["created_at"] = pd.to_datetime(
                 hist_slice["created_at"], errors="coerce", utc=True,
-            ).dt.tz_localize(None)
-
+            ).dt.tz_convert("Asia/Kuala_Lumpur").dt.tz_localize(None)
+            
             live_slice["created_at"] = pd.to_datetime(
                 live_slice["created_at"], errors="coerce", utc=True,
-            ).dt.tz_localize(None)
+            ).dt.tz_convert("Asia/Kuala_Lumpur").dt.tz_localize(None)
 
             # ---------------------------------------------------------
             # COMBINE HISTORICAL + LIVE
