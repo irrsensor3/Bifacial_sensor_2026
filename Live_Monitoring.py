@@ -66,10 +66,45 @@ def _irr_build_created_at(df: pd.DataFrame) -> pd.DataFrame:
         df["created_at"] = pd.NaT
     return df
 
+# Streamlit Community Cloud gives the app roughly 1 GB. One day of sensor data
+# is about 8.7 MB on disk and several times that once loaded into pandas as 74
+# float columns, so an unbounded month-long range exhausted memory and the app
+# was killed. These caps keep a request bounded; the user is told when one bites.
+MAX_LOAD_FILES = 7          # days per download
+MAX_PLOT_POINTS = 4000      # per series, after downsampling
+
+
+def _downsample_for_plot(df, time_col="created_at", max_points=MAX_PLOT_POINTS):
+    """Thin a frame to a size a browser chart can actually draw.
+
+    A month at five-second resolution is half a million points per series. No
+    screen has that many pixels, so the detail is invisible, but the browser
+    still has to receive and render every one of them -- which is what made the
+    page hang before it crashed.
+    """
+    if df is None or df.empty or len(df) <= max_points:
+        return df
+    step = max(1, len(df) // max_points)
+    return df.iloc[::step].copy()
+
+
 def _load_range(period_files, download_fn, build_created_at, start_date, end_date):
     """Downloads+combines the given Drive files and trims to exactly
     [start_date, end_date]. Shared by both the auto-load-on-open path and
     the manual range picker so they can't drift apart."""
+    # Take the most recent files when a range exceeds the cap: a truncated
+    # window ending at the requested date is more useful than one that starts
+    # there and stops early.
+    truncated = len(period_files) > MAX_LOAD_FILES
+    if truncated:
+        period_files = sorted(
+            period_files, key=lambda f: f.get("name", ""))[-MAX_LOAD_FILES:]
+        st.warning(
+            f"That range covers more days than can be loaded at once. Showing "
+            f"the most recent {MAX_LOAD_FILES} day(s). For longer periods, "
+            f"analyse the CSV files directly rather than through this page."
+        )
+
     file_entries = tuple((f["id"], f.get("modifiedTime")) for f in period_files)
     df_hist = download_fn(file_entries)
     if build_created_at is not None:
@@ -564,8 +599,19 @@ def render_live_monitoring():
                 with y_max_col:
                     irr_chart_ymax = st.number_input("Y max (W/m²)", value=1200.0, key="live_irr_ymax", disabled=irr_chart_auto)
 
+            # Thin before plotting. Sending half a million points to the
+            # browser hangs the tab long before the extra detail becomes
+            # visible on screen.
+            plot_src = _downsample_for_plot(combined)
+            if len(plot_src) < len(combined):
+                st.caption(
+                    f"Showing {len(plot_src):,} of {len(combined):,} points. "
+                    f"The shape of the trace is preserved; narrow the date "
+                    f"range to see every reading."
+                )
+
             fig = plot_line_chart(
-                combined, "created_at", selected_live_irr,
+                plot_src, "created_at", selected_live_irr,
                 x_range=(x_start_t, x_end_t),
                 y_range=None if irr_chart_auto else (irr_chart_ymin, irr_chart_ymax),
                 y_title="Irradiance (W/m²)",
@@ -777,6 +823,12 @@ def render_live_monitoring():
             )
             pivot.columns = [f"Meter {int(c)}" for c in pivot.columns]
             pivot_reset = pivot.reset_index()
+            n_full = len(pivot_reset)
+            pivot_reset = _downsample_for_plot(pivot_reset)
+            if len(pivot_reset) < n_full:
+                st.caption(
+                    f"Showing {len(pivot_reset):,} of {n_full:,} points."
+                )
             meter_cols = [c for c in pivot_reset.columns if c != "created_at"]
 
             with st.expander("📐 Chart scale (optional)"):

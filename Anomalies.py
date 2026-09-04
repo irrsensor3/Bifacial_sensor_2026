@@ -26,7 +26,11 @@ from email.mime.multipart import MIMEMultipart
 MAX_DAYS = 14
 
 PAGE_SIZE = 1000
-MAX_ROWS = 400_000          # hard ceiling, whatever the period asks for
+# 400,000 rows of meter data is roughly 300 MB once in pandas, against about
+# 1 GB of memory on Streamlit Community Cloud -- enough to have the app killed
+# mid-analysis. 14 days at the observed rate is around 120,000 rows, so this
+# still covers the full range the page offers.
+MAX_ROWS = 150_000
 
 SEVERITY_STYLE = {
     "high": ("🔴", "High"),
