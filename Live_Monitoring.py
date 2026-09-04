@@ -70,6 +70,21 @@ def _irr_build_created_at(df: pd.DataFrame) -> pd.DataFrame:
 # is about 8.7 MB on disk and several times that once loaded into pandas as 74
 # float columns, so an unbounded month-long range exhausted memory and the app
 # was killed. These caps keep a request bounded; the user is told when one bites.
+LOCAL_TZ = "Asia/Kuala_Lumpur"
+
+
+def to_local(series):
+    """Parse a created_at column and move it to array-local time.
+
+    The database stores UTC. Historical files loaded from Drive are already
+    converted, but live rows were not, so the two sat eight hours apart on the
+    same chart -- a reading taken at 11:24 in the morning appeared at 03:24 and
+    looked like the array was generating in the middle of the night.
+    """
+    ts = pd.to_datetime(series, errors="coerce", utc=True)
+    return ts.dt.tz_convert(LOCAL_TZ).dt.tz_localize(None)
+
+
 MAX_LOAD_FILES = 7          # days per download
 MAX_PLOT_POINTS = 4000      # per series, after downsampling
 
@@ -668,7 +683,7 @@ def render_live_monitoring():
             st.info("No live panel meter data yet — waiting for the mini PC to push a sample.")
             return
 
-        df_panel["created_at"] = pd.to_datetime(df_panel["created_at"], errors="coerce")
+        df_panel["created_at"] = to_local(df_panel["created_at"])
 
         latest_per_device = (
             df_panel.sort_values("created_at").groupby("device_id").tail(1).sort_values("device_id")
@@ -846,6 +861,36 @@ def render_live_monitoring():
                 with dcm_y_max_col:
                     dcm_chart_ymax = st.number_input("Y max", value=default_max, key="dcm_trend_ymax", disabled=dcm_chart_auto)
 
+            # A whole day, midnight to midnight. Comparing one day against
+            # another is far easier when both start and end at the same clock
+            # time than when the window floats with whatever data is loaded.
+            day_col, span_col = st.columns([1, 2])
+            with day_col:
+                whole_day = st.checkbox(
+                    "Whole day view", value=False, key="dcm_whole_day",
+                    help="Fix the axis to 00:00-23:59 on one date, so days can "
+                         "be compared like for like.")
+            day_start = day_end = None
+            if whole_day:
+                avail = pd.to_datetime(pivot_reset["created_at"], errors="coerce")
+                dmin, dmax = avail.min(), avail.max()
+                if pd.notna(dmin) and pd.notna(dmax):
+                    with span_col:
+                        chosen = st.date_input(
+                            "Date", value=dmax.date(),
+                            min_value=dmin.date(), max_value=dmax.date(),
+                            key="dcm_day_pick")
+                    day_start = pd.Timestamp(chosen)
+                    day_end = day_start + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)
+                    in_day = (avail >= day_start) & (avail <= day_end)
+                    if in_day.sum() == 0:
+                        st.warning(
+                            f"No readings loaded for {chosen}. Use the "
+                            f"historical append control above to fetch that day."
+                        )
+                    else:
+                        pivot_reset = pivot_reset[in_day.values].copy()
+
             metric_axis_label = {
                 "voltage_v": "Voltage (V)", "current_a": "Current (A)", "active_power_kw": "Power (kW)",
             }.get(metric_choice, "Energy (kWh)")
@@ -880,7 +925,11 @@ def render_live_monitoring():
 
             dcm_fig = plot_line_chart(
                 pivot_reset, "created_at", meter_cols,
-                x_range=None,
+                # Fixing the axis to the whole day means a partial day reads as
+                # partial, instead of being stretched to fill the plot and
+                # looking like a complete one.
+                x_range=(day_start.to_pydatetime(), day_end.to_pydatetime())
+                        if day_start is not None else None,
                 y_range=None,
                 y_title=metric_axis_label,
             )
