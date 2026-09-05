@@ -656,6 +656,7 @@ def render_live_monitoring():
                 plot_src, "created_at", selected_live_irr,
                 x_range=(x_start_t, x_end_t),
                 y_range=None if irr_chart_auto else (irr_chart_ymin, irr_chart_ymax),
+                x_title="Time (Malaysia, UTC+8)",
                 y_title="Irradiance (W/m²)",
             )
             st.plotly_chart(fig, use_container_width=True)
@@ -683,8 +684,9 @@ def render_live_monitoring():
             else:
                 st.error(f"{len(currently_invalid)} sensor(s) currently below 0°C and not logging:")
                 for _, row in currently_invalid.sort_values("sensor_id").iterrows():
-                    when = pd.to_datetime(row["created_at"], errors="coerce")
-                    when_txt = when.strftime("%H:%M:%S") if pd.notna(when) else "unknown time"
+                    when = pd.to_datetime(row["created_at"], errors="coerce", utc=True)
+                    when_txt = (when.tz_convert(LOCAL_TZ).strftime("%H:%M:%S")
+                                if pd.notna(when) else "unknown time")
                     st.markdown(
                         f"**Sensor {int(row['sensor_id'])}** — {row['temp_c']} °C "
                         f"at {when_txt} (bus {row.get('bus', '?')}, "
@@ -958,6 +960,7 @@ def render_live_monitoring():
                 x_range=(day_start.to_pydatetime(), day_end.to_pydatetime())
                         if day_start is not None else None,
                 y_range=None,
+                x_title="Time (Malaysia, UTC+8)",
                 y_title=metric_axis_label,
             )
             st.plotly_chart(dcm_fig, use_container_width=True)

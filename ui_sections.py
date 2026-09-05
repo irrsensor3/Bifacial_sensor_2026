@@ -1041,7 +1041,8 @@ def plot_line_chart(
     y_cols,
     x_range=None,
     y_range=None,
-    y_title=""
+    y_title="",
+    x_title="",
 ):
     import plotly.graph_objects as go
     import pandas as pd
@@ -1108,6 +1109,7 @@ def plot_line_chart(
         )
 
     fig.update_layout(
+        xaxis_title=x_title,
         height=380,
 
         margin=dict(
