@@ -345,13 +345,22 @@ def _historical_append_controls(key_prefix, available_files, download_fn, build_
 
     mode = st.radio(
         "Range",
-        ["Month", "Year", "Date range", "From date", "Until date"],
+        ["Single day", "Month", "Year", "Date range", "From date", "Until date"],
         horizontal=True,
         key=f"{key_prefix}_mode",
     )
 
     start_date = end_date = None
-    if mode == "Month":
+    if mode == "Single day":
+        # The common case: one date, one day of data. Offered first because
+        # picking a month to look at one day loads thirty times more than is
+        # wanted and is the main way this page was made to run out of memory.
+        pick = st.date_input(
+            "Date", value=latest, min_value=earliest, max_value=latest,
+            key=f"{key_prefix}_single_day")
+        start_date = end_date = pick
+
+    elif mode == "Month":
         yr_col, mo_col = st.columns(2)
         with yr_col:
             yr = st.selectbox("Year", sorted(years, reverse=True), key=f"{key_prefix}_year")
@@ -465,6 +474,24 @@ def render_live_monitoring():
     # so it's fine for it to rerun the whole page).
     # -------------------------
     st.subheader("Sensors")
+    # Auto-refresh reruns the whole fragment on a timer, and each rerun
+    # re-slices, re-concatenates and re-plots whatever history is loaded. With
+    # a month in session state that is hundreds of megabytes rebuilt every few
+    # seconds, and memory climbs until the app is killed -- which is why the
+    # chart appeared first and the crash came later. Refusing to auto-refresh
+    # while a large history is loaded removes the repetition, not the data.
+    _loaded = [st.session_state.get(f"_{k}_df")
+               for k in ("live_append_irr", "live_append_dcm",
+                         "live_append_dcm_avg")]
+    _loaded_rows = sum(len(d) for d in _loaded if d is not None)
+    if _loaded_rows > 50_000:
+        st.session_state["live_auto_refresh"] = False
+        st.info(
+            f"Auto-refresh paused: {_loaded_rows:,} rows of historical data are "
+            f"loaded. Redrawing that every few seconds is what exhausts memory. "
+            f"Use Refresh now, or clear the history to resume automatic updates."
+        )
+
     ref_on, ref_int = st.columns([1, 3])
     with ref_on:
         auto_refresh = st.toggle("Auto-refresh", value=True, key="live_auto_refresh")
