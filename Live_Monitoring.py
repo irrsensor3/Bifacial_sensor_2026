@@ -604,16 +604,12 @@ def render_live_monitoring():
             
                 hist_slice = hist[["created_at"] + selected_live_irr].copy()
             
-                # Normalize HISTORICAL timestamps
-                hist_slice["created_at"] = (
-                    pd.to_datetime(
-                        hist_slice["created_at"],
-                        errors="coerce",
-                        utc=True,
-                    )
-                    .dt.tz_convert("Asia/Kuala_Lumpur")
-                    .dt.tz_localize(None)
-                )
+                # _load_range already returns timezone-naive LOCAL times --
+                # see the conversion at the end of that function. Converting
+                # again here added a second eight hours, so a 13:14 reading
+                # plotted at 21:14. Parse only; do not shift.
+                hist_slice["created_at"] = pd.to_datetime(
+                    hist_slice["created_at"], errors="coerce")
             
                 combined = pd.concat(
                     [hist_slice, combined],
@@ -788,9 +784,9 @@ def render_live_monitoring():
             # Convert BOTH sides to UTC, then remove timezone information
             # so pandas sees both as datetime64[ns].
             # ---------------------------------------------------------
+            # Already local, for the same reason as the sensor chart above.
             hist_slice["created_at"] = pd.to_datetime(
-                hist_slice["created_at"], errors="coerce", utc=True,
-            ).dt.tz_convert("Asia/Kuala_Lumpur").dt.tz_localize(None)
+                hist_slice["created_at"], errors="coerce")
             
             live_slice["created_at"] = pd.to_datetime(
                 live_slice["created_at"], errors="coerce", utc=True,
