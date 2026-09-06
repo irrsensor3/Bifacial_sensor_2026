@@ -103,34 +103,6 @@ def _downsample_for_plot(df, time_col="created_at", max_points=MAX_PLOT_POINTS):
     return df.iloc[::step].copy()
 
 
-def _dcm_build_created_at(df: pd.DataFrame) -> pd.DataFrame:
-    """Normalise DC meter file timestamps to UTC, as the sensor loader does.
-
-    The meter CSVs carry a `Datetime` column written in ARRAY-LOCAL time --
-    verified against a recorded day, where generation runs 07:00 to 18:00 and
-    peaks at 13:00. Everything downstream assumes created_at is UTC and
-    converts it to local for display, so an already-local value passed through
-    unchanged was shifted eight hours backwards and a day of generation
-    appeared to begin at 23:20 the night before.
-    """
-    df = df.copy()
-    src = "Datetime" if "Datetime" in df.columns else (
-          "created_at" if "created_at" in df.columns else None)
-    if src is None:
-        df["created_at"] = pd.NaT
-        return df
-    naive = pd.to_datetime(df[src], errors="coerce")
-    if getattr(naive.dt, "tz", None) is not None:
-        df["created_at"] = naive.dt.tz_convert("UTC").dt.tz_localize(None)
-    else:
-        df["created_at"] = (
-            naive.dt.tz_localize(LOCAL_TZ, ambiguous="NaT", nonexistent="NaT")
-                 .dt.tz_convert("UTC")
-                 .dt.tz_localize(None)
-        )
-    return df
-
-
 def _load_range(period_files, download_fn, build_created_at, start_date, end_date):
     """Downloads+combines the given Drive files and trims to exactly
     [start_date, end_date]. Shared by both the auto-load-on-open path and
@@ -793,7 +765,6 @@ def render_live_monitoring():
                 "live_append_dcm_avg" if use_avg else "live_append_dcm",
                 available_dcm_files,
                 download_and_combine_dcm_csvs,
-                build_created_at=_dcm_build_created_at,
             )
 
         if df_dcm_hist is not None and not df_dcm_hist.empty:

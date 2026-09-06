@@ -509,18 +509,24 @@ def _standardize_dcm_columns(df: pd.DataFrame) -> pd.DataFrame:
     df = df.rename(columns=rename_map)
 
     if "created_at" in df.columns:
+        # The Datetime column in these files is ARRAY-LOCAL time, not UTC --
+        # confirmed against a recorded day, where generation runs 07:00 to
+        # 18:00 and peaks at 13:00.
+        #
+        # Passing utc=True to a naive value LABELS it as UTC without shifting
+        # it, so local 13:00 became 13:00 UTC and the display then showed it as
+        # 21:00. Localising to the array's zone first, then converting, gives
+        # the genuine UTC instant.
         naive = pd.to_datetime(df["created_at"], errors="coerce")
-        # Parse timestamps and normalize them to UTC.
-        df["created_at"] = pd.to_datetime(
-            df["created_at"],
-            errors="coerce",
-            utc=True,
-        )
-
-        # Remove timezone information after converting to UTC.
-        # This makes historical timestamps compatible with any
-        # timezone-naive timestamps used elsewhere in the app.
-        df["created_at"] = df["created_at"].dt.tz_localize(None)
+        if getattr(naive.dt, "tz", None) is not None:
+            df["created_at"] = naive.dt.tz_convert("UTC").dt.tz_localize(None)
+        else:
+            df["created_at"] = (
+                naive.dt.tz_localize("Asia/Kuala_Lumpur",
+                                     ambiguous="NaT", nonexistent="NaT")
+                     .dt.tz_convert("UTC")
+                     .dt.tz_localize(None)
+            )
 
     return df
  
