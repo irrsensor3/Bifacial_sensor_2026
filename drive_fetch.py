@@ -1,4 +1,3 @@
-
 import io
 import re
 from datetime import datetime
@@ -514,11 +513,12 @@ def _standardize_dcm_columns(df: pd.DataFrame) -> pd.DataFrame:
         # 18:00 and peaks at 13:00.
         #
         # Passing utc=True to a naive value LABELS it as UTC without shifting
-        # it, so local 13:00 became 13:00 UTC and the display then showed it as
-        # 21:00. Localising to the array's zone first, then converting, gives
-        # the genuine UTC instant.
+        # it, so local 13:00 became "13:00 UTC" and the chart then displayed it
+        # as 21:00. Localising to the array's zone first, then converting,
+        # gives the genuine UTC instant.
         naive = pd.to_datetime(df["created_at"], errors="coerce")
         if getattr(naive.dt, "tz", None) is not None:
+            # Already carries an offset: convert rather than assume.
             df["created_at"] = naive.dt.tz_convert("UTC").dt.tz_localize(None)
         else:
             df["created_at"] = (

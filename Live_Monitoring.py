@@ -156,16 +156,6 @@ def _load_range(period_files, download_fn, build_created_at, start_date, end_dat
 # from blocking/crashing the Streamlit app.
 DRIVE_SYNC_INTERVAL_SECONDS = 1800
 
-# Separate, coarser pass: unconditionally re-pull today's Drive file(s) and
-# MERGE (not replace) into the cache. Supabase's live table only keeps a
-# rolling window, and the Pi's rclone sync of today's CSV can itself lag real
-# time -- so a slice of "today" can briefly exist in neither source. The
-# signature-gated sync above only re-downloads when Drive's modifiedTime
-# changed and then trusts the download as a full replacement; this pass runs
-# on its own clock regardless of signature, and dedups against what's already
-# cached instead of assuming the fresh pull is a superset.
-GAP_FILL_INTERVAL_SECONDS = 3 * 60 * 60  # 3 hours
-
 
 def _sync_drive_history_if_due(key_prefix, available_files, download_fn, build_created_at=None):
     """
@@ -256,125 +246,23 @@ def _sync_drive_history_if_due(key_prefix, available_files, download_fn, build_c
     return st.session_state.get(f"_{key_prefix}_df")
 
 
-def _gapfill_today_if_due(key_prefix, available_files, download_fn, build_created_at=None):
-    """Every GAP_FILL_INTERVAL_SECONDS, unconditionally re-download today's
-    Drive file(s) and MERGE them into the cache (dedup by timestamp),
-    rather than trusting a modifiedTime-gated replace.
-
-    Supabase's live table only keeps a rolling window, and the Pi's rclone
-    sync of today's CSV can itself lag behind real time. That leaves a
-    window where a slice of "today" exists in neither source -- if the
-    signature-gated sync above ever misses that slice (e.g. it fires right
-    before Drive catches up), this pass still finds and folds it in on its
-    own schedule, without discarding anything already loaded that Drive
-    doesn't have (yet) either.
-
-    Only runs while the currently-loaded view IS today -- this is a live-
-    view backfill, not a general historical-range refresher.
-    """
-    if not available_files:
-        return
-
-    start_date = st.session_state.get(f"_{key_prefix}_start_date")
-    end_date = st.session_state.get(f"_{key_prefix}_end_date")
-    today = date.today()
-    if start_date != today or end_date != today:
-        return
-
-    now = time.monotonic()
-    last_fill = st.session_state.get(f"_{key_prefix}_last_gapfill_monotonic", 0.0)
-    if now - last_fill < GAP_FILL_INTERVAL_SECONDS:
-        return
-    st.session_state[f"_{key_prefix}_last_gapfill_monotonic"] = now
-
-    today_files = resolve_period_files(available_files, today, today)
-    if not today_files or len(today_files) > 10:
-        return
-
-    try:
-        df_fresh = _load_range(today_files, download_fn, build_created_at, today, today)
-    except Exception as exc:
-        st.session_state[f"_{key_prefix}_sync_error"] = str(exc)
-        return
-
-    if df_fresh is None or df_fresh.empty:
-        return
-
-    df_cached = st.session_state.get(f"_{key_prefix}_df")
-    if df_cached is None or df_cached.empty:
-        merged = df_fresh
-    else:
-        merged = pd.concat([df_cached, df_fresh], ignore_index=True)
-        id_col = "device_id" if "device_id" in merged.columns else None
-        subset = ["created_at"] + ([id_col] if id_col else [])
-        merged = (
-            merged.dropna(subset=["created_at"])
-                  .drop_duplicates(subset=subset, keep="last")
-                  .sort_values("created_at")
-                  .reset_index(drop=True)
-        )
-
-    st.session_state[f"_{key_prefix}_df"] = merged
-    # Keep the signature-gated sync above from immediately redoing this work
-    # on its own next check.
-    st.session_state[f"_{key_prefix}_today_signature"] = tuple(
-        (f["id"], f.get("modifiedTime", "")) for f in today_files
-    )
-    st.session_state[f"_{key_prefix}_sync_error"] = None
-
-
-def _time_range_controls(key_prefix, data_min_t, data_max_t,
-                          day_start=None, day_end=None, reset_signal=None):
+def _time_range_controls(key_prefix, data_min_t, data_max_t):
     """From/to date+time pickers for zooming a chart's X axis, in place of a
     two-handle range slider. When the two ends of the loaded data are close
     together (e.g. only a few hours of "today" logged so far), a slider's
     handles overlap and become nearly impossible to grab separately,
     especially by touch — typing or tapping a date and time directly has no
-    such problem.
-
-    day_start/day_end: calendar bounds of the loaded period (e.g. 00:00 of
-    the first loaded day through 23:59:59 of the last). When given, these --
-    not data_min_t/data_max_t -- seed the pickers, so "today, partially
-    logged so far" still shows a 00:00-23:59 frame (with Auto Y-axis, the
-    trace just occupies whatever slice has actually arrived) instead of the
-    axis shrink-wrapping to only the logged portion.
-
-    reset_signal: anything that changes when the loaded period changes
-    (e.g. the (start_date, end_date) tuple _historical_append_controls
-    already tracks). st.date_input/st.time_input only honor their `value=`
-    argument the first time a given widget `key` is created in a session --
-    every later rerun just returns whatever is already in session_state,
-    ignoring `value=` entirely. Without this, once "today" grows to include
-    more of the day (or a different range is loaded), the pickers would stay
-    frozen at whatever range existed the moment they were first created.
-    Passing a changing reset_signal lets this function detect that and
-    reseed session_state directly, which is what actually moves the pickers.
-    """
+    such problem."""
     if data_min_t >= data_max_t:
         st.caption("Only one timestamp in range — nothing to adjust yet.")
         return data_min_t, data_max_t
-
-    sig_key = f"_{key_prefix}_reset_signal"
-    if reset_signal is not None and st.session_state.get(sig_key) != reset_signal:
-        st.session_state[sig_key] = reset_signal
-        seed_start = day_start or data_min_t
-        seed_end = day_end or data_max_t
-        st.session_state[f"{key_prefix}_start_date"] = seed_start.date()
-        st.session_state[f"{key_prefix}_start_time"] = seed_start.time()
-        st.session_state[f"{key_prefix}_end_date"] = seed_end.date()
-        st.session_state[f"{key_prefix}_end_time"] = seed_end.time()
-
-    # min/max_value bounds must cover both the actual data and the (possibly
-    # wider) calendar-day seed, or Streamlit clamps/errors on out-of-range values.
-    min_d = min(data_min_t.date(), (day_start or data_min_t).date())
-    max_d = max(data_max_t.date(), (day_end or data_max_t).date())
 
     start_col, end_col = st.columns(2)
     with start_col:
         st.caption("From")
         start_date_v = st.date_input(
             "From date", value=data_min_t.date(),
-            min_value=min_d, max_value=max_d,
+            min_value=data_min_t.date(), max_value=data_max_t.date(),
             key=f"{key_prefix}_start_date", label_visibility="collapsed",
         )
         start_time_v = st.time_input(
@@ -385,7 +273,7 @@ def _time_range_controls(key_prefix, data_min_t, data_max_t,
         st.caption("To")
         end_date_v = st.date_input(
             "To date", value=data_max_t.date(),
-            min_value=min_d, max_value=max_d,
+            min_value=data_min_t.date(), max_value=data_max_t.date(),
             key=f"{key_prefix}_end_date", label_visibility="collapsed",
         )
         end_time_v = st.time_input(
@@ -454,7 +342,6 @@ def _historical_append_controls(key_prefix, available_files, download_fn, build_
                     (f["id"], f.get("modifiedTime", "")) for f in today_files
                 )
                 st.session_state[f"_{key_prefix}_last_sync_monotonic"] = time.monotonic()
-                st.session_state[f"_{key_prefix}_last_gapfill_monotonic"] = time.monotonic()
 
     mode = st.radio(
         "Range",
@@ -544,7 +431,6 @@ def _historical_append_controls(key_prefix, available_files, download_fn, build_
         st.session_state[f"_{key_prefix}_start_date"] = start_date
         st.session_state[f"_{key_prefix}_end_date"] = end_date
         st.session_state[f"_{key_prefix}_last_sync_monotonic"] = time.monotonic()
-        st.session_state[f"_{key_prefix}_last_gapfill_monotonic"] = time.monotonic()
         st.session_state[f"_{key_prefix}_sync_error"] = None
         st.success(f"Loaded {df_hist.shape[0]} rows from {start_date:%d %b %Y} – {end_date:%d %b %Y}")
 
@@ -559,17 +445,12 @@ def _historical_append_controls(key_prefix, available_files, download_fn, build_
                 st.session_state[f"_{key_prefix}_start_date"] = None
                 st.session_state[f"_{key_prefix}_end_date"] = None
                 st.session_state[f"_{key_prefix}_last_sync_monotonic"] = 0.0
-                st.session_state[f"_{key_prefix}_last_gapfill_monotonic"] = 0.0
                 st.session_state[f"_{key_prefix}_sync_error"] = None
                 st.rerun(scope="fragment")
 
-    # Refresh the currently loaded Drive range: a signature-gated replace
-    # every 30 min, plus an unconditional merge-based gap-fill every 3 hours
-    # to catch anything that slipped through a race between Supabase's
-    # rolling retention and the Pi's rclone sync of today's CSV.
+    # Refresh the currently loaded Drive range only every 5 minutes.
     # This applies to TODAY as well as any older/custom range the user loaded.
     _sync_drive_history_if_due(key_prefix, available_files, download_fn, build_created_at=build_created_at)
-    _gapfill_today_if_due(key_prefix, available_files, download_fn, build_created_at=build_created_at)
 
     sync_error = st.session_state.get(f"_{key_prefix}_sync_error")
     if sync_error:
@@ -747,22 +628,7 @@ def render_live_monitoring():
                 data_min_t = combined["created_at"].min().to_pydatetime()
                 data_max_t = combined["created_at"].max().to_pydatetime()
                 st.caption("X range (time)")
-
-                # Seed the pickers from the whole calendar day currently
-                # loaded (not just the timestamps that happen to exist yet),
-                # so "today, partially logged" still shows 00:00-23:59.
-                loaded_start = st.session_state.get("_live_append_start_date")
-                loaded_end = st.session_state.get("_live_append_end_date")
-                day_start_dt = (datetime.combine(loaded_start, datetime.min.time())
-                                if loaded_start else None)
-                day_end_dt = (datetime.combine(loaded_end, datetime.max.time())
-                              if loaded_end else None)
-
-                x_start_t, x_end_t = _time_range_controls(
-                    "live_irr_x", data_min_t, data_max_t,
-                    day_start=day_start_dt, day_end=day_end_dt,
-                    reset_signal=(loaded_start, loaded_end),
-                )
+                x_start_t, x_end_t = _time_range_controls("live_irr_x", data_min_t, data_max_t)
 
                 irr_chart_auto = st.checkbox("Auto Y-axis", value=True, key="live_irr_y_auto")
                 y_min_col, y_max_col = st.columns(2)
@@ -891,9 +757,8 @@ def render_live_monitoring():
                 with st.expander("Error details"):
                     st.code(st.session_state["_dcm_drive_list_error"])
         
-            dcm_prefix = "live_append_dcm_avg" if use_avg else "live_append_dcm"
             df_dcm_hist, _ = _historical_append_controls(
-                dcm_prefix,
+                "live_append_dcm_avg" if use_avg else "live_append_dcm",
                 available_dcm_files,
                 download_and_combine_dcm_csvs,
             )
@@ -1010,19 +875,7 @@ def render_live_monitoring():
                 data_min_t = pivot_reset["created_at"].min().to_pydatetime()
                 data_max_t = pivot_reset["created_at"].max().to_pydatetime()
                 st.caption("X range (time)")
-
-                loaded_start = st.session_state.get(f"_{dcm_prefix}_start_date")
-                loaded_end = st.session_state.get(f"_{dcm_prefix}_end_date")
-                day_start_dt = (datetime.combine(loaded_start, datetime.min.time())
-                                if loaded_start else None)
-                day_end_dt = (datetime.combine(loaded_end, datetime.max.time())
-                              if loaded_end else None)
-
-                dcm_x_start, dcm_x_end = _time_range_controls(
-                    "dcm_trend_x", data_min_t, data_max_t,
-                    day_start=day_start_dt, day_end=day_end_dt,
-                    reset_signal=(loaded_start, loaded_end),
-                )
+                dcm_x_start, dcm_x_end = _time_range_controls("dcm_trend_x", data_min_t, data_max_t)
 
                 dcm_chart_auto = st.checkbox("Auto Y-axis", value=True, key="dcm_trend_y_auto")
                 default_min = float(pivot[meter_cols].min(numeric_only=True).min()) if not pivot.empty else 0.0
