@@ -371,6 +371,68 @@ def inject_theme():
             border-radius: var(--r) !important;
             box-shadow: var(--shadow) !important;
         }
+        /* Streamlit's default warning is pale yellow with yellow-brown text,
+           which falls below readable contrast on a bright screen and vanishes
+           entirely on a projector. Each kind gets a legible background, dark
+           text and a coloured spine. Several test-id spellings are listed
+           because the name changed between Streamlit versions. */
+        [data-testid="stAlertContentWarning"],
+        [data-testid="stAlertContentWarning"] p,
+        div[data-baseweb="notification"][kind="warning"] {
+            background-color: #FDF3E3 !important;
+            color: #6B3E05 !important;
+        }
+        [data-testid="stAlertContentInfo"],
+        [data-testid="stAlertContentInfo"] p {
+            background-color: #E6F2F4 !important;
+            color: #0B4A52 !important;
+        }
+        [data-testid="stAlertContentSuccess"],
+        [data-testid="stAlertContentSuccess"] p {
+            background-color: #E7F3EC !important;
+            color: #1C4C36 !important;
+        }
+        [data-testid="stAlertContentError"],
+        [data-testid="stAlertContentError"] p {
+            background-color: #FBEAE8 !important;
+            color: #7A1710 !important;
+        }
+        /* Older builds put the colour on the outer container instead. */
+        div[data-testid="stAlert"] p,
+        div[data-testid="stNotification"] p { color: inherit !important; }
+
+        div[data-testid="stAlert"]:has([data-testid="stAlertContentWarning"]) {
+            border-left: 4px solid var(--sun-deep) !important;
+        }
+        div[data-testid="stAlert"]:has([data-testid="stAlertContentError"]) {
+            border-left: 4px solid var(--alert) !important;
+        }
+        div[data-testid="stAlert"]:has([data-testid="stAlertContentSuccess"]) {
+            border-left: 4px solid var(--power) !important;
+        }
+        div[data-testid="stAlert"]:has([data-testid="stAlertContentInfo"]) {
+            border-left: 4px solid var(--rear) !important;
+        }
+
+        /* Power controls: the one place on the site where a wrong click stops
+           data collection, so it is marked out rather than left looking like
+           any other section. */
+        .danger-zone {
+            border: 1px solid #E9B8B3;
+            border-left: 4px solid var(--alert);
+            border-radius: 12px;
+            background: #FDF6F5;
+            padding: 1rem 1.1rem;
+            margin-bottom: 1rem;
+        }
+        .danger-zone h4 {
+            margin: 0 0 .3rem; font-size: 1rem; font-weight: 700;
+            color: var(--alert);
+        }
+        .danger-zone p {
+            margin: 0; font-size: .88rem; color: #6B2B24; line-height: 1.5;
+        }
+
         div[data-testid="stAlert"] {
             border-radius: 12px !important; border: 1px solid var(--line) !important;
         }

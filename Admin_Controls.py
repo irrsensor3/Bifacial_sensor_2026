@@ -21,9 +21,16 @@ def render_admin_controls():
     # Power controls
     # -------------------------
     st.subheader("Power controls")
-    st.caption(
-        "These act on the logger. A shutdown needs someone on site to power the "
-        "Pi back on, and logging stops until they do."
+    # Marked out in red: this is the only place on the site where a wrong click
+    # stops data collection, and a shutdown cannot be undone from here.
+    st.markdown(
+        '<div class="danger-zone">'
+        '<h4>&#9888; These commands stop the logger</h4>'
+        '<p>A reboot interrupts logging for about a minute. A <b>shutdown</b> '
+        'stops it until somebody goes to the roof and powers the Pi back on — '
+        'no data is recorded in the meantime, and it cannot be undone from '
+        'this page.</p></div>',
+        unsafe_allow_html=True,
     )
 
     def _send_command(command: str, label: str):
@@ -52,14 +59,19 @@ def render_admin_controls():
     ):
         pending = f"_confirm_{cmd}"
         with st.container(border=True):
-            st.markdown(f"**{label} the Raspberry Pi**")
+            st.markdown(
+                f'<span style="color:#A3231B;font-weight:700">{label} the '
+                f'Raspberry Pi</span>', unsafe_allow_html=True)
             st.caption(warning)
             if not st.session_state.get(pending):
                 if st.button(f"{label} the logger", key=f"{cmd}_start"):
                     st.session_state[pending] = True
                     st.rerun()
             else:
-                st.warning(f"Confirm: {label.lower()} the logger now?")
+                st.error(
+                    f"**Confirm: {label.lower()} the logger now?** "
+                    f"{'Logging stops until someone restarts it by hand.' if cmd == 'shutdown' else 'Logging stops for about a minute.'}"
+                )
                 yes, no = st.columns(2)
                 with yes:
                     if st.button(f"Yes, {label.lower()} now", key=f"{cmd}_yes",
