@@ -150,26 +150,27 @@ def _load_range(period_files, download_fn, build_created_at, start_date, end_dat
     return df_hist
 
 
-# Google Drive historical data is intentionally much slower than the live
-# Supabase refresh.  Live data can refresh every 15 seconds, while Drive is
-# checked only once every 30 minutes.  This prevents repeated Drive downloads
-# from blocking/crashing the Streamlit app.
-DRIVE_SYNC_INTERVAL_SECONDS = 1800
+# Google Drive historical data is intentionally slower than the live Supabase
+# refresh, but not by much: live data can refresh every 15 seconds, while
+# Drive is re-checked every 15 minutes. That interval is a MERGE, not a
+# replace -- Supabase's live table only keeps a rolling window, and the Pi's
+# rclone sync of today's CSV can itself lag behind real time, so a slice of
+# "today" can briefly exist in neither source. Re-downloading today's Drive
+# file periodically and merging (deduping by timestamp) into the cache means
+# that slice gets filled in as soon as rclone catches up, without ever
+# discarding rows the live feed already has that Drive doesn't have yet.
+DRIVE_SYNC_INTERVAL_SECONDS = 15 * 60
 
 
 def _sync_drive_history_if_due(key_prefix, available_files, download_fn, build_created_at=None):
     """
-    Refresh today's Drive data periodically.
+    Every DRIVE_SYNC_INTERVAL_SECONDS, re-download today's Drive file(s) and
+    MERGE the result into today's cached dataset (dedup by timestamp),
+    rather than trusting a fresh download as a full replacement.
 
-    Historical data already loaded into the session is NOT touched.
-
-    For today's data:
-        - check Drive every DRIVE_SYNC_INTERVAL_SECONDS
-        - if the CSV has not changed, do nothing
-        - if it changed, download the latest version
-        - replace only today's cached data
-
-    This prevents historical CSVs from being repeatedly processed.
+    Historical (non-today) data already loaded into the session is never
+    touched by this -- it only ever acts on the currently-loaded range when
+    that range is exactly today.
     """
 
     if not available_files:
@@ -191,6 +192,8 @@ def _sync_drive_history_if_due(key_prefix, available_files, download_fn, build_c
     if now - last_sync < DRIVE_SYNC_INTERVAL_SECONDS:
         return st.session_state.get(f"_{key_prefix}_df")
 
+    st.session_state[f"_{key_prefix}_last_sync_monotonic"] = now
+
     # ---------------------------------------------------------
     # Find today's CSV
     # ---------------------------------------------------------
@@ -209,34 +212,39 @@ def _sync_drive_history_if_due(key_prefix, available_files, download_fn, build_c
         return st.session_state.get(f"_{key_prefix}_df")
 
     # ---------------------------------------------------------
-    # Detect whether today's files actually changed
-    # ---------------------------------------------------------
-    current_signature = tuple((f["id"], f.get("modifiedTime", "")) for f in today_files)
-    previous_signature = st.session_state.get(f"_{key_prefix}_today_signature")
-
-    # Mark sync time regardless of whether data changed.
-    st.session_state[f"_{key_prefix}_last_sync_monotonic"] = now
-
-    # Nothing changed on Drive.
-    if current_signature == previous_signature:
-        return st.session_state.get(f"_{key_prefix}_df")
-
-    # ---------------------------------------------------------
-    # Download today's updated CSV
+    # Download today's current CSV and MERGE it into the cache. Merging
+    # (instead of a signature-gated replace) means this still catches rows
+    # that arrived on Drive late even if nothing else about the file's
+    # identity changed between checks, which is exactly the Supabase-missed
+    # data this exists to backfill.
     # ---------------------------------------------------------
     try:
-        df_today = _load_range(today_files, download_fn, build_created_at, today, today)
+        df_fresh = _load_range(today_files, download_fn, build_created_at, today, today)
 
-        if df_today is None or df_today.empty:
+        if df_fresh is None or df_fresh.empty:
             return st.session_state.get(f"_{key_prefix}_df")
 
-        # -----------------------------------------------------
-        # Replace ONLY today's cached dataset.
-        #
-        # Historical data is never downloaded here.
-        # -----------------------------------------------------
-        st.session_state[f"_{key_prefix}_df"] = df_today
-        st.session_state[f"_{key_prefix}_today_signature"] = current_signature
+        df_cached = st.session_state.get(f"_{key_prefix}_df")
+        if df_cached is None or df_cached.empty:
+            merged = df_fresh
+        else:
+            merged = pd.concat([df_cached, df_fresh], ignore_index=True)
+            # IRR frames are wide (one row per timestamp, no device column);
+            # DCM frames are long (one row per device per timestamp) -- dedup
+            # on whichever key actually identifies a unique reading.
+            id_col = "device_id" if "device_id" in merged.columns else None
+            subset = ["created_at"] + ([id_col] if id_col else [])
+            merged = (
+                merged.dropna(subset=["created_at"])
+                      .drop_duplicates(subset=subset, keep="last")
+                      .sort_values("created_at")
+                      .reset_index(drop=True)
+            )
+
+        st.session_state[f"_{key_prefix}_df"] = merged
+        st.session_state[f"_{key_prefix}_today_signature"] = tuple(
+            (f["id"], f.get("modifiedTime", "")) for f in today_files
+        )
         st.session_state[f"_{key_prefix}_label"] = f"{today:%d %b %Y}"
         st.session_state[f"_{key_prefix}_sync_error"] = None
 
@@ -246,23 +254,70 @@ def _sync_drive_history_if_due(key_prefix, available_files, download_fn, build_c
     return st.session_state.get(f"_{key_prefix}_df")
 
 
-def _time_range_controls(key_prefix, data_min_t, data_max_t):
+def _reseed_widget_value(session_key, signal_key, signal, seed_value):
+    """Streamlit widgets only honor their `value=` argument the first time a
+    given `key` is created in a session -- every later rerun just returns
+    whatever is already in session_state, ignoring `value=` entirely. Call
+    this BEFORE creating the widget: when `signal` differs from what was
+    last seen, this overwrites session_state[session_key] directly so the
+    widget actually picks up the new default on this rerun (e.g. so a chart
+    axis defaulting to "today" keeps following today as today changes,
+    instead of freezing at whichever day/range it first saw).
+    """
+    if st.session_state.get(signal_key) != signal:
+        st.session_state[signal_key] = signal
+        st.session_state[session_key] = seed_value
+
+
+def _time_range_controls(key_prefix, data_min_t, data_max_t,
+                          day_start=None, day_end=None, reset_signal=None):
     """From/to date+time pickers for zooming a chart's X axis, in place of a
     two-handle range slider. When the two ends of the loaded data are close
     together (e.g. only a few hours of "today" logged so far), a slider's
     handles overlap and become nearly impossible to grab separately,
     especially by touch — typing or tapping a date and time directly has no
-    such problem."""
+    such problem.
+
+    day_start/day_end: calendar bounds of the loaded period (e.g. 00:00 of
+    the first loaded day through 23:59:59 of the last). When given, these --
+    not data_min_t/data_max_t -- seed the pickers, so auto-loaded "today,
+    only partially logged so far" still defaults to a 00:00-23:59 frame
+    (with Auto Y-axis on, the trace itself just occupies whatever slice has
+    actually arrived) instead of the axis shrink-wrapping to only the
+    logged portion.
+
+    reset_signal: anything that changes when the loaded period changes
+    (e.g. the (start_date, end_date) tuple _historical_append_controls
+    already tracks). See _reseed_widget_value -- without this, the pickers
+    would freeze on whatever range existed the moment they were first
+    created and never widen to a full day on their own.
+    """
     if data_min_t >= data_max_t:
         st.caption("Only one timestamp in range — nothing to adjust yet.")
         return data_min_t, data_max_t
+
+    if reset_signal is not None:
+        seed_start = day_start or data_min_t
+        seed_end = day_end or data_max_t
+        sig_key = f"_{key_prefix}_reset_signal"
+        if st.session_state.get(sig_key) != reset_signal:
+            st.session_state[sig_key] = reset_signal
+            st.session_state[f"{key_prefix}_start_date"] = seed_start.date()
+            st.session_state[f"{key_prefix}_start_time"] = seed_start.time()
+            st.session_state[f"{key_prefix}_end_date"] = seed_end.date()
+            st.session_state[f"{key_prefix}_end_time"] = seed_end.time()
+
+    # min/max_value bounds must cover both the actual data and the (possibly
+    # wider) calendar-day seed, or Streamlit clamps/errors on out-of-range values.
+    min_d = min(data_min_t.date(), (day_start or data_min_t).date())
+    max_d = max(data_max_t.date(), (day_end or data_max_t).date())
 
     start_col, end_col = st.columns(2)
     with start_col:
         st.caption("From")
         start_date_v = st.date_input(
             "From date", value=data_min_t.date(),
-            min_value=data_min_t.date(), max_value=data_max_t.date(),
+            min_value=min_d, max_value=max_d,
             key=f"{key_prefix}_start_date", label_visibility="collapsed",
         )
         start_time_v = st.time_input(
@@ -273,7 +328,7 @@ def _time_range_controls(key_prefix, data_min_t, data_max_t):
         st.caption("To")
         end_date_v = st.date_input(
             "To date", value=data_max_t.date(),
-            min_value=data_min_t.date(), max_value=data_max_t.date(),
+            min_value=min_d, max_value=max_d,
             key=f"{key_prefix}_end_date", label_visibility="collapsed",
         )
         end_time_v = st.time_input(
@@ -448,8 +503,9 @@ def _historical_append_controls(key_prefix, available_files, download_fn, build_
                 st.session_state[f"_{key_prefix}_sync_error"] = None
                 st.rerun(scope="fragment")
 
-    # Refresh the currently loaded Drive range only every 5 minutes.
-    # This applies to TODAY as well as any older/custom range the user loaded.
+    # Refresh the currently loaded Drive range (merge, not replace) every
+    # DRIVE_SYNC_INTERVAL_SECONDS. This applies to TODAY as well as any
+    # older/custom range the user loaded.
     _sync_drive_history_if_due(key_prefix, available_files, download_fn, build_created_at=build_created_at)
 
     sync_error = st.session_state.get(f"_{key_prefix}_sync_error")
@@ -458,7 +514,7 @@ def _historical_append_controls(key_prefix, available_files, download_fn, build_
 
     label = st.session_state.get(f"_{key_prefix}_label")
     if label:
-        st.caption(f"Currently appended: {label} • Drive sync every 30 min")
+        st.caption(f"Currently appended: {label} • Drive sync every 15 min")
 
     return st.session_state.get(f"_{key_prefix}_df"), label
 
@@ -628,7 +684,22 @@ def render_live_monitoring():
                 data_min_t = combined["created_at"].min().to_pydatetime()
                 data_max_t = combined["created_at"].max().to_pydatetime()
                 st.caption("X range (time)")
-                x_start_t, x_end_t = _time_range_controls("live_irr_x", data_min_t, data_max_t)
+
+                # Default the axis to the whole calendar day currently loaded
+                # (not just whichever timestamps happen to exist yet), so
+                # auto-loaded "today, partially logged" still shows 00:00-23:59.
+                loaded_start = st.session_state.get("_live_append_start_date")
+                loaded_end = st.session_state.get("_live_append_end_date")
+                day_start_dt = (datetime.combine(loaded_start, datetime.min.time())
+                                if loaded_start else None)
+                day_end_dt = (datetime.combine(loaded_end, datetime.max.time())
+                              if loaded_end else None)
+
+                x_start_t, x_end_t = _time_range_controls(
+                    "live_irr_x", data_min_t, data_max_t,
+                    day_start=day_start_dt, day_end=day_end_dt,
+                    reset_signal=(loaded_start, loaded_end),
+                )
 
                 irr_chart_auto = st.checkbox("Auto Y-axis", value=True, key="live_irr_y_auto")
                 y_min_col, y_max_col = st.columns(2)
@@ -757,8 +828,9 @@ def render_live_monitoring():
                 with st.expander("Error details"):
                     st.code(st.session_state["_dcm_drive_list_error"])
         
+            dcm_prefix = "live_append_dcm_avg" if use_avg else "live_append_dcm"
             df_dcm_hist, _ = _historical_append_controls(
-                "live_append_dcm_avg" if use_avg else "live_append_dcm",
+                dcm_prefix,
                 available_dcm_files,
                 download_and_combine_dcm_csvs,
             )
@@ -778,19 +850,22 @@ def render_live_monitoring():
             # ---------------------------------------------------------
             # NORMALIZE TIMESTAMPS
             # ---------------------------------------------------------
-            # Historical Drive data and live Supabase data may use
-            # different timezone representations.
-            #
-            # Convert BOTH sides to UTC, then remove timezone information
-            # so pandas sees both as datetime64[ns].
+            # Both sides must end up as timezone-naive local time.
             # ---------------------------------------------------------
             # Already local, for the same reason as the sensor chart above.
             hist_slice["created_at"] = pd.to_datetime(
                 hist_slice["created_at"], errors="coerce")
-            
+
+            # df_panel["created_at"] was already converted from UTC to
+            # array-local naive time by to_local() at the top of this
+            # fragment. Re-labeling it "utc=True" here and converting to
+            # Asia/Kuala_Lumpur AGAIN added a second +8-hour shift on top of
+            # that first one -- a reading actually taken at 16:30 local got
+            # stamped 00:30 the *next* calendar day, which is exactly what
+            # would break a whole-day 00:00-23:59 view. Parse only; do not
+            # shift again.
             live_slice["created_at"] = pd.to_datetime(
-                live_slice["created_at"], errors="coerce", utc=True,
-            ).dt.tz_convert("Asia/Kuala_Lumpur").dt.tz_localize(None)
+                live_slice["created_at"], errors="coerce")
 
             # ---------------------------------------------------------
             # COMBINE HISTORICAL + LIVE
@@ -875,7 +950,19 @@ def render_live_monitoring():
                 data_min_t = pivot_reset["created_at"].min().to_pydatetime()
                 data_max_t = pivot_reset["created_at"].max().to_pydatetime()
                 st.caption("X range (time)")
-                dcm_x_start, dcm_x_end = _time_range_controls("dcm_trend_x", data_min_t, data_max_t)
+
+                loaded_start = st.session_state.get(f"_{dcm_prefix}_start_date")
+                loaded_end = st.session_state.get(f"_{dcm_prefix}_end_date")
+                day_start_dt = (datetime.combine(loaded_start, datetime.min.time())
+                                if loaded_start else None)
+                day_end_dt = (datetime.combine(loaded_end, datetime.max.time())
+                              if loaded_end else None)
+
+                dcm_x_start, dcm_x_end = _time_range_controls(
+                    "dcm_trend_x", data_min_t, data_max_t,
+                    day_start=day_start_dt, day_end=day_end_dt,
+                    reset_signal=(loaded_start, loaded_end),
+                )
 
                 dcm_chart_auto = st.checkbox("Auto Y-axis", value=True, key="dcm_trend_y_auto")
                 default_min = float(pivot[meter_cols].min(numeric_only=True).min()) if not pivot.empty else 0.0
@@ -900,6 +987,15 @@ def render_live_monitoring():
                 avail = pd.to_datetime(pivot_reset["created_at"], errors="coerce")
                 dmin, dmax = avail.min(), avail.max()
                 if pd.notna(dmin) and pd.notna(dmax):
+                    # Reseed the picker's default whenever the data's most
+                    # recent date moves (a new day, or a different range
+                    # loaded) -- otherwise `value=dmax.date()` below is only
+                    # honored the first time this widget key is created and
+                    # freezes on whatever date it happened to see first.
+                    _reseed_widget_value(
+                        "dcm_day_pick", "_dcm_day_pick_signal",
+                        dmax.date(), dmax.date(),
+                    )
                     with span_col:
                         chosen = st.date_input(
                             "Date", value=dmax.date(),
