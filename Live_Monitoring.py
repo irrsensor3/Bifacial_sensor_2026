@@ -1,7 +1,9 @@
 import calendar
+import re
 import time
 from datetime import date, datetime
 
+import numpy as np
 import streamlit as st
 import pandas as pd
 
@@ -22,7 +24,17 @@ from drive_fetch import (
     resolve_period_files,
     list_available_dcm_csvs,
     download_and_combine_dcm_csvs,
+    list_available_filled_csvs,
+    download_and_combine_filled_csvs,
+    FILLED_FLAG_SUFFIX,
 )
+
+# One colour for every gap-filled segment, whichever sensor it belongs to,
+# and one legend entry to go with it. The question a reader has is "is this
+# reading real or reconstructed", not "which sensor was reconstructed" --
+# that is already answered by the trace underneath it. Colouring per sensor
+# would double the legend and make the two questions compete.
+GAP_FILL_COLOUR = "#FF7A1A"
 
 
 def st_autorefresh_builtin(seconds: int):
@@ -87,6 +99,15 @@ def to_local(series):
 
 MAX_LOAD_FILES = 7          # days per download
 MAX_PLOT_POINTS = 4000      # per series, after downsampling
+
+
+def _sensor_sort_key(name: str):
+    """Irr_1, Irr_2, ... Irr_10, then Temp_1, ... — numeric, not lexical,
+    so Irr_10 doesn't sort between Irr_1 and Irr_2."""
+    match = re.match(r"^(Irr|Temp)[\s_-]*0*(\d+)$", str(name), re.IGNORECASE)
+    if match:
+        return (0 if match.group(1).lower() == "irr" else 1, int(match.group(2)), "")
+    return (2, 0, str(name))
 
 
 def _downsample_for_plot(df, time_col="created_at", max_points=MAX_PLOT_POINTS):
@@ -359,10 +380,10 @@ def _historical_append_controls(key_prefix, available_files, download_fn, build_
     survives other widget interactions on the page (selecting sensors,
     changing the metric, etc. no longer clear it).
 
-    `download_fn` is download_and_combine_csvs or
-    download_and_combine_dcm_csvs — both are disk-cached (see drive_fetch.py),
-    so re-requesting a period anyone has already viewed is instant rather
-    than a fresh Drive download.
+    `download_fn` is download_and_combine_csvs,
+    download_and_combine_dcm_csvs or download_and_combine_filled_csvs — all
+    are disk-cached (see drive_fetch.py), so re-requesting a period anyone
+    has already viewed is instant rather than a fresh Drive download.
     """
     if not available_files:
         st.caption("No Drive CSVs found yet.")
@@ -373,6 +394,13 @@ def _historical_append_controls(key_prefix, available_files, download_fn, build_
         st.caption("Couldn't determine dates for the files found.")
         return st.session_state.get(f"_{key_prefix}_df"), st.session_state.get(f"_{key_prefix}_label")
     earliest, latest = date(min(years), 1, 1), date(max(years), 12, 31)
+
+    # The newest day actually present, where the filenames say. Defaulting the
+    # single-day picker to 31 December of the newest year lands on a day that
+    # usually has no file at all -- fine for a folder that is written to every
+    # day, useless for one filled in batches.
+    dated = [f["data_date"] for f in available_files if f.get("data_date")]
+    default_day = max(dated) if dated else latest
 
     # Auto-load today's data once per session, no button press. Guarded by
     # a flag (not just "is there data yet") so explicitly removing it via
@@ -411,7 +439,7 @@ def _historical_append_controls(key_prefix, available_files, download_fn, build_
         # picking a month to look at one day loads thirty times more than is
         # wanted and is the main way this page was made to run out of memory.
         pick = st.date_input(
-            "Date", value=latest, min_value=earliest, max_value=latest,
+            "Date", value=default_day, min_value=earliest, max_value=latest,
             key=f"{key_prefix}_single_day")
         start_date = end_date = pick
 
@@ -441,13 +469,17 @@ def _historical_append_controls(key_prefix, available_files, download_fn, build_
             start_date, end_date = picked
         else:
             st.caption("Pick both a start and an end date.")
-    elif mode == "≥ From date":
+    # These two must match the option strings above exactly. They used to be
+    # written "≥ From date" / "≤ Until date" here while the radio offered
+    # "From date" / "Until date", so neither branch could ever run and both
+    # modes fell through to "Pick a valid range."
+    elif mode == "From date":
         start_date = st.date_input(
             "≥", value=earliest, min_value=earliest, max_value=latest,
             key=f"{key_prefix}_from",
         )
         end_date = latest
-    elif mode == "≤ Until date":
+    elif mode == "Until date":
         end_date = st.date_input(
             "≤", value=latest, min_value=earliest, max_value=latest,
             key=f"{key_prefix}_until",
@@ -519,6 +551,65 @@ def _historical_append_controls(key_prefix, available_files, download_fn, build_
     return st.session_state.get(f"_{key_prefix}_df"), label
 
 
+def _gap_filled_overlay(fig, plot_src, value_cols):
+    """Draw every reconstructed reading, from every selected sensor, as a
+    single extra trace in one colour.
+
+    One trace rather than one per sensor because that is what keeps the
+    legend to a single "Gap-filled" entry however many sensors are shown --
+    a per-sensor colour would double an already long legend to answer a
+    question the trace underneath already answers. Runs of consecutive
+    filled points are separated by a None so unrelated stretches (and
+    different sensors) aren't joined by a line straight across the chart.
+
+    Returns how many filled points were drawn.
+    """
+    xs, ys = [], []
+    drawn = 0
+    times = plot_src["created_at"].to_numpy()
+
+    for column in value_cols:
+        flag_col = column + FILLED_FLAG_SUFFIX
+        if flag_col not in plot_src.columns or column not in plot_src.columns:
+            continue
+        mask = plot_src[flag_col].fillna(False).to_numpy(dtype=bool)
+        if not mask.any():
+            continue
+        values = pd.to_numeric(plot_src[column], errors="coerce").to_numpy(dtype="float64")
+        mask = mask & ~np.isnan(values)
+        if not mask.any():
+            continue
+
+        drawn += int(mask.sum())
+        indices = np.flatnonzero(mask)
+        for run in np.split(indices, np.flatnonzero(np.diff(indices) != 1) + 1):
+            if run.size == 0:
+                continue
+            xs.extend(times[run].tolist())
+            ys.extend(values[run].tolist())
+            xs.append(None)
+            ys.append(None)
+
+    if not drawn:
+        return 0
+
+    import plotly.graph_objects as _go
+    fig.add_trace(_go.Scatter(
+        x=xs, y=ys,
+        mode="lines+markers",
+        name="Gap-filled",
+        legendgroup="gap_filled",
+        showlegend=True,
+        connectgaps=False,
+        line={"color": GAP_FILL_COLOUR, "width": 2},
+        # A gap of one sample has no line to draw, so it would be invisible
+        # without a marker.
+        marker={"color": GAP_FILL_COLOUR, "size": 4},
+        hovertemplate="Gap-filled: %{y:.1f}<extra></extra>",
+    ))
+    return drawn
+
+
 def render_live_monitoring():
     require_login()
 
@@ -537,8 +628,8 @@ def render_live_monitoring():
     # chart appeared first and the crash came later. Refusing to auto-refresh
     # while a large history is loaded removes the repetition, not the data.
     _loaded = [st.session_state.get(f"_{k}_df")
-               for k in ("live_append_irr", "live_append_dcm",
-                         "live_append_dcm_avg")]
+               for k in ("live_append_irr", "live_append", "live_append_filled",
+                         "live_append_dcm", "live_append_dcm_avg")]
     _loaded_rows = sum(len(d) for d in _loaded if d is not None)
     if _loaded_rows > 50_000:
         st.session_state["live_auto_refresh"] = False
@@ -609,36 +700,90 @@ def render_live_monitoring():
                 f"chart and the raw table below."
             )
 
+        # The historical picker sits above the sensor picker because which
+        # source is loaded decides what there is to pick: the gap-filled
+        # files carry Temp_ series the live feed doesn't have.
+        with st.expander("🗄️ Append historical data from Drive"):
+            irr_source = st.radio(
+                "Historical data",
+                ["Raw", "Gap-filled"],
+                horizontal=True,
+                key="irr_historical_source",
+                help="Gap-filled reads filled_<date>.csv from the OUTPUT "
+                     "folder. Where the matching flags_<date>.csv marks a "
+                     "reading as filled_gap rather than measured, it is drawn "
+                     "in a separate colour on the chart.",
+            )
+
+            if irr_source == "Gap-filled":
+                irr_prefix = "live_append_filled"
+                available_files = list_available_filled_csvs()
+                if not available_files:
+                    filled_error = st.session_state.get("_filled_drive_list_error")
+                    if filled_error:
+                        with st.expander("Error details"):
+                            st.code(filled_error)
+                # created_at is built inside drive_fetch for these files
+                # (from their Date + Time columns), so no build_created_at.
+                df_hist, _ = _historical_append_controls(
+                    irr_prefix,
+                    available_files,
+                    download_and_combine_filled_csvs,
+                )
+            else:
+                irr_prefix = "live_append"
+                available_files = list_available_csvs()
+                df_hist, _ = _historical_append_controls(
+                    irr_prefix, available_files, download_and_combine_csvs,
+                    build_created_at=_irr_build_created_at,
+                )
+
+        # Anything plottable: the live irradiance columns, plus whatever
+        # series the loaded history adds (Temp_1..Temp_24 in the gap-filled
+        # files). The __filled companions are data about the data, not
+        # series in their own right, so they never appear here.
+        hist_series_cols = []
+        if df_hist is not None and not df_hist.empty:
+            hist_series_cols = [
+                c for c in df_hist.columns
+                if (str(c).startswith("Irr_") or str(c).startswith("Temp_"))
+                and not str(c).endswith(FILLED_FLAG_SUFFIX)
+            ]
+        plot_cols = sorted(
+            set(irr_cols) | set(hist_series_cols), key=_sensor_sort_key
+        )
+
         if "selected_live_irr" not in st.session_state:
-            st.session_state.selected_live_irr = irr_cols[:1]
+            st.session_state.selected_live_irr = plot_cols[:1]
         else:
-            st.session_state.selected_live_irr = [c for c in st.session_state.selected_live_irr if c in irr_cols]
+            st.session_state.selected_live_irr = [
+                c for c in st.session_state.selected_live_irr if c in plot_cols
+            ]
 
         irr_label_col, irr_all_col, irr_none_col = st.columns([4, 1, 1])
         with irr_label_col:
-            st.caption("Irradiance sensors to plot (live)")
+            st.caption("Sensors to plot")
         with irr_all_col:
             if st.button("Select all", key="live_irr_select_all", use_container_width=True):
-                st.session_state.selected_live_irr = irr_cols
+                st.session_state.selected_live_irr = plot_cols
         with irr_none_col:
             if st.button("Remove all", key="live_irr_remove_all", use_container_width=True):
                 st.session_state.selected_live_irr = []
 
-        with st.expander("🗄️ Append historical data from Drive"):
-            available_files = list_available_csvs()
-            df_hist, _ = _historical_append_controls(
-                "live_append", available_files, download_and_combine_csvs,
-                build_created_at=_irr_build_created_at,
-            )
-
         selected_live_irr = st.multiselect(
-            "Irradiance sensors to plot (live)",
-            irr_cols,
+            "Sensors to plot",
+            plot_cols,
             key="selected_live_irr",
             label_visibility="collapsed",
         )
         if selected_live_irr:
-            combined = df_live[["created_at"] + selected_live_irr].copy()
+            flag_cols = [c + FILLED_FLAG_SUFFIX for c in selected_live_irr]
+
+            # reindex rather than [] indexing: a selected Temp_ column has no
+            # counterpart in the live feed, and asking for it directly would
+            # raise instead of leaving an empty live half.
+            combined = df_live.reindex(
+                columns=["created_at"] + selected_live_irr).copy()
 
             # Normalize LIVE timestamps
             combined["created_at"] = (
@@ -650,30 +795,34 @@ def render_live_monitoring():
                 .dt.tz_convert("Asia/Kuala_Lumpur")
                 .dt.tz_localize(None)
             )
-            
+
+            # Nothing arriving live was reconstructed.
+            for flag_col in flag_cols:
+                combined[flag_col] = False
+
             if df_hist is not None and not df_hist.empty:
-                hist = df_hist.copy()
-            
-                for c in selected_live_irr:
-                    if c not in hist.columns:
-                        hist[c] = pd.NA
-            
-                hist_slice = hist[["created_at"] + selected_live_irr].copy()
-            
+                hist_slice = df_hist.reindex(
+                    columns=["created_at"] + selected_live_irr + flag_cols).copy()
+
                 # _load_range already returns timezone-naive LOCAL times --
                 # see the conversion at the end of that function. Converting
                 # again here added a second eight hours, so a 13:14 reading
                 # plotted at 21:14. Parse only; do not shift.
                 hist_slice["created_at"] = pd.to_datetime(
                     hist_slice["created_at"], errors="coerce")
-            
+
+                # Raw history has no flag columns at all, so reindex left
+                # them NaN: a raw reading is a measured one.
+                for flag_col in flag_cols:
+                    hist_slice[flag_col] = hist_slice[flag_col].fillna(False).astype(bool)
+
                 combined = pd.concat(
                     [hist_slice, combined],
                     ignore_index=True,
                 )
-            
+
             # Both historical and live timestamps are now
-            # timezone-naive UTC timestamps.
+            # timezone-naive local timestamps.
             combined = (
                 combined
                 .dropna(subset=["created_at"])
@@ -688,8 +837,8 @@ def render_live_monitoring():
                 # Default the axis to the whole calendar day currently loaded
                 # (not just whichever timestamps happen to exist yet), so
                 # auto-loaded "today, partially logged" still shows 00:00-23:59.
-                loaded_start = st.session_state.get("_live_append_start_date")
-                loaded_end = st.session_state.get("_live_append_end_date")
+                loaded_start = st.session_state.get(f"_{irr_prefix}_start_date")
+                loaded_end = st.session_state.get(f"_{irr_prefix}_end_date")
                 day_start_dt = (datetime.combine(loaded_start, datetime.min.time())
                                 if loaded_start else None)
                 day_end_dt = (datetime.combine(loaded_end, datetime.max.time())
@@ -698,7 +847,7 @@ def render_live_monitoring():
                 x_start_t, x_end_t = _time_range_controls(
                     "live_irr_x", data_min_t, data_max_t,
                     day_start=day_start_dt, day_end=day_end_dt,
-                    reset_signal=(loaded_start, loaded_end),
+                    reset_signal=(irr_prefix, loaded_start, loaded_end),
                 )
 
                 irr_chart_auto = st.checkbox("Auto Y-axis", value=True, key="live_irr_y_auto")
@@ -710,7 +859,8 @@ def render_live_monitoring():
 
             # Thin before plotting. Sending half a million points to the
             # browser hangs the tab long before the extra detail becomes
-            # visible on screen.
+            # visible on screen. The __filled columns ride along in the same
+            # frame, so a thinned point keeps its own marking.
             plot_src = _downsample_for_plot(combined)
             if len(plot_src) < len(combined):
                 st.caption(
@@ -719,14 +869,42 @@ def render_live_monitoring():
                     f"range to see every reading."
                 )
 
+            has_irr = any(str(c).startswith("Irr_") for c in selected_live_irr)
+            has_temp = any(str(c).startswith("Temp_") for c in selected_live_irr)
+            if has_irr and has_temp:
+                y_title = "Irradiance (W/m²) / Temperature (°C)"
+            elif has_temp:
+                y_title = "Temperature (°C)"
+            else:
+                y_title = "Irradiance (W/m²)"
+
             fig = plot_line_chart(
                 plot_src, "created_at", selected_live_irr,
                 x_range=(x_start_t, x_end_t),
                 y_range=None if irr_chart_auto else (irr_chart_ymin, irr_chart_ymax),
                 x_title="Time (Malaysia, UTC+8)",
-                y_title="Irradiance (W/m²)",
+                y_title=y_title,
             )
+            n_filled = _gap_filled_overlay(fig, plot_src, selected_live_irr)
             st.plotly_chart(fig, use_container_width=True)
+
+            if has_irr and has_temp:
+                st.caption(
+                    "Irradiance and temperature are on one axis, so their "
+                    "scales aren't comparable — useful for lining up timing, "
+                    "not for reading values off each other."
+                )
+            if n_filled:
+                st.caption(
+                    f"{n_filled:,} of the plotted points were reconstructed by "
+                    f"the gap filler and are drawn in orange, on every sensor."
+                )
+            elif irr_source == "Gap-filled" and df_hist is not None and not df_hist.empty:
+                st.caption(
+                    "No gap-filled readings in this range — either nothing "
+                    "needed filling, or no flags_<date>.csv was found for "
+                    "these days."
+                )
 
         with st.expander("Raw readings table"):
             st.caption(f"{len(df_live):,} rows, newest last.")
