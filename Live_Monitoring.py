@@ -685,20 +685,26 @@ def render_live_monitoring():
         st.caption(f"Last update: {latest.get('date', '')} {latest.get('time', '')}")
 
         irr_cols = [c for c in df_live.columns if c.startswith("Irr_")]
+        irr_cols = sorted(irr_cols, key=_sensor_sort_key)
 
         def _fmt(val, unit, places=1):
             num = pd.to_numeric(val, errors="coerce")
             return f"{num:,.{places}f} {unit}" if pd.notna(num) else "no reading"
 
-        shown = irr_cols[:4]
-        cols = st.columns(max(len(shown), 1))
-        for i, col in enumerate(shown):
-            cols[i].metric(col.replace("_", " "), _fmt(latest[col], "W/m²"))
-        if len(irr_cols) > 4:
-            st.caption(
-                f"Showing 4 of {len(irr_cols)} sensors. The full set is in the "
-                f"chart and the raw table below."
-            )
+        # Every sensor, mirroring how the panel-meter section below shows
+        # every device rather than a fixed-size sample -- but as a stacked,
+        # collapsible list rather than a wide row of columns, so 24 of them
+        # don't turn into 24 columns squeezed onto a phone screen. Each
+        # sensor's current reading is already visible on its collapsed
+        # title; opening it just makes that one reading bigger.
+        st.caption(f"{len(irr_cols)} sensors")
+        for col in irr_cols:
+            reading = _fmt(latest[col], "W/m²")
+            label = col.replace("_", " ")
+            has_reading = pd.notna(pd.to_numeric(latest[col], errors="coerce"))
+            icon = "🟢" if has_reading else "⚪"
+            with st.expander(f"{icon} {label} — {reading}"):
+                st.metric(label, reading)
 
         # The historical picker sits above the sensor picker because which
         # source is loaded decides what there is to pick: the gap-filled
