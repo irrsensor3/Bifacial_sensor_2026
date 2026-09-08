@@ -693,12 +693,8 @@ def render_live_monitoring():
 
         # Every sensor, stacked the same way the panel-meter section below
         # stacks every device: a plain "meter-head" row (name + status),
-        # metric underneath, reusing that exact CSS class for visual
-        # consistency between the two sections. st.expander can't hold this
-        # look collapsed -- its title bar only accepts plain text, so the
-        # coloured OK/No-reading badge can't render in it. A small toggle
-        # button next to the header collapses just the value instead, so the
-        # styled header stays untouched either way.
+        # readings underneath, reusing that exact CSS class for visual
+        # consistency between the two sections.
         st.caption(f"{len(irr_cols)} sensors")
         for col in irr_cols:
             reading = _fmt(latest[col], "W/m²")
@@ -706,24 +702,27 @@ def render_live_monitoring():
             has_reading = pd.notna(pd.to_numeric(latest[col], errors="coerce"))
             state = ('<span class="state ok">OK</span>' if has_reading
                      else '<span class="state bad">No reading</span>')
+            st.markdown(f'<div class="meter-head">{label}{state}</div>',
+                        unsafe_allow_html=True)
 
-            toggle_key = f"_irr_card_open_{col}"
-            st.session_state.setdefault(toggle_key, True)
-            is_open = st.session_state[toggle_key]
+            # Same sensor channel, same live table -- Irr_N's paired Temp_N,
+            # if the live feed has one. .get() rather than [] since not
+            # every deployment necessarily carries a Temp_ column per sensor.
+            temp_col = "Temp_" + col.split("_", 1)[1]
+            temp_val = pd.to_numeric(latest.get(temp_col), errors="coerce")
+            has_temp = pd.notna(temp_val)
 
-            head_col, btn_col = st.columns([6, 1])
-            with head_col:
-                st.markdown(f'<div class="meter-head">{label}{state}</div>',
-                            unsafe_allow_html=True)
-            with btn_col:
-                if st.button("▲" if is_open else "▼",
-                             key=f"_irr_toggle_btn_{col}",
-                             use_container_width=True):
-                    st.session_state[toggle_key] = not is_open
-                    st.rerun(scope="fragment")
-
-            if st.session_state[toggle_key]:
+            irr_val_col, temp_val_col = st.columns([3, 2])
+            with irr_val_col:
                 st.metric(label, reading, label_visibility="collapsed")
+            with temp_val_col:
+                if has_temp:
+                    st.metric("Temp", f"{temp_val:,.1f} °C", label_visibility="collapsed")
+                else:
+                    # A missing temperature reading is a smaller, quieter
+                    # note next to the irradiance value, not an equally
+                    # weighted "no reading" competing with it.
+                    st.caption("no temp reading")
 
         # The historical picker sits above the sensor picker because which
         # source is loaded decides what there is to pick: the gap-filled
