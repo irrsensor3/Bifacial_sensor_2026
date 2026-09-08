@@ -369,7 +369,7 @@ def download_csv_as_df(file_id: str) -> pd.DataFrame:
 
 def format_file_label(file_entry: dict) -> str:
     """Human-friendly label for a dropdown option, e.g.
-    'Bifacial_ 2026-07-29.csv — modified 2026-07-30 03:12'."""
+    'Bifacial_2026-07-29.csv — modified 2026-07-30 03:12'."""
     name = file_entry.get("name", "unknown.csv")
     modified = file_entry.get("modifiedTime", "")
     try:
