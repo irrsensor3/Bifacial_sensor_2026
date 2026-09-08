@@ -693,9 +693,12 @@ def render_live_monitoring():
 
         # Every sensor, stacked the same way the panel-meter section below
         # stacks every device: a plain "meter-head" row (name + status),
-        # metric underneath, no box or collapse -- reusing that exact CSS
-        # class keeps the two sections visually consistent instead of one
-        # looking like a bordered accordion and the other plain cards.
+        # metric underneath, reusing that exact CSS class for visual
+        # consistency between the two sections. st.expander can't hold this
+        # look collapsed -- its title bar only accepts plain text, so the
+        # coloured OK/No-reading badge can't render in it. A small toggle
+        # button next to the header collapses just the value instead, so the
+        # styled header stays untouched either way.
         st.caption(f"{len(irr_cols)} sensors")
         for col in irr_cols:
             reading = _fmt(latest[col], "W/m²")
@@ -703,9 +706,24 @@ def render_live_monitoring():
             has_reading = pd.notna(pd.to_numeric(latest[col], errors="coerce"))
             state = ('<span class="state ok">OK</span>' if has_reading
                      else '<span class="state bad">No reading</span>')
-            st.markdown(f'<div class="meter-head">{label}{state}</div>',
-                        unsafe_allow_html=True)
-            st.metric(label, reading, label_visibility="collapsed")
+
+            toggle_key = f"_irr_card_open_{col}"
+            st.session_state.setdefault(toggle_key, True)
+            is_open = st.session_state[toggle_key]
+
+            head_col, btn_col = st.columns([6, 1])
+            with head_col:
+                st.markdown(f'<div class="meter-head">{label}{state}</div>',
+                            unsafe_allow_html=True)
+            with btn_col:
+                if st.button("▲" if is_open else "▼",
+                             key=f"_irr_toggle_btn_{col}",
+                             use_container_width=True):
+                    st.session_state[toggle_key] = not is_open
+                    st.rerun(scope="fragment")
+
+            if st.session_state[toggle_key]:
+                st.metric(label, reading, label_visibility="collapsed")
 
         # The historical picker sits above the sensor picker because which
         # source is loaded decides what there is to pick: the gap-filled
