@@ -691,20 +691,21 @@ def render_live_monitoring():
             num = pd.to_numeric(val, errors="coerce")
             return f"{num:,.{places}f} {unit}" if pd.notna(num) else "no reading"
 
-        # Every sensor, mirroring how the panel-meter section below shows
-        # every device rather than a fixed-size sample -- but as a stacked,
-        # collapsible list rather than a wide row of columns, so 24 of them
-        # don't turn into 24 columns squeezed onto a phone screen. Each
-        # sensor's current reading is already visible on its collapsed
-        # title; opening it just makes that one reading bigger.
+        # Every sensor, stacked the same way the panel-meter section below
+        # stacks every device: a plain "meter-head" row (name + status),
+        # metric underneath, no box or collapse -- reusing that exact CSS
+        # class keeps the two sections visually consistent instead of one
+        # looking like a bordered accordion and the other plain cards.
         st.caption(f"{len(irr_cols)} sensors")
         for col in irr_cols:
             reading = _fmt(latest[col], "W/m²")
             label = col.replace("_", " ")
             has_reading = pd.notna(pd.to_numeric(latest[col], errors="coerce"))
-            icon = "🟢" if has_reading else "⚪"
-            with st.expander(f"{icon} {label} — {reading}"):
-                st.metric(label, reading)
+            state = ('<span class="state ok">OK</span>' if has_reading
+                     else '<span class="state bad">No reading</span>')
+            st.markdown(f'<div class="meter-head">{label}{state}</div>',
+                        unsafe_allow_html=True)
+            st.metric(label, reading, label_visibility="collapsed")
 
         # The historical picker sits above the sensor picker because which
         # source is loaded decides what there is to pick: the gap-filled
