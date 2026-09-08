@@ -687,6 +687,24 @@ def render_live_monitoring():
         irr_cols = [c for c in df_live.columns if c.startswith("Irr_")]
         irr_cols = sorted(irr_cols, key=_sensor_sort_key)
 
+        # Temp_ writes once a minute against Irr_'s every-5-seconds cadence,
+        # so the single latest row has a real temperature in roughly 1 of
+        # every 12 ticks -- the rest are null even though a reading from
+        # moments ago is sitting earlier in this same sliding window.
+        # Forward-filling down the window (already oldest-first, see the
+        # raw table caption below) and taking the last row recovers "most
+        # recently known temperature" instead of "temperature this instant".
+        temp_cols_all = [c for c in df_live.columns if c.startswith("Temp_")]
+        if temp_cols_all:
+            temp_latest = (
+                df_live[temp_cols_all]
+                .apply(pd.to_numeric, errors="coerce")
+                .ffill()
+                .iloc[-1]
+            )
+        else:
+            temp_latest = pd.Series(dtype="float64")
+
         def _fmt(val, unit, places=1):
             num = pd.to_numeric(val, errors="coerce")
             return f"{num:,.{places}f} {unit}" if pd.notna(num) else "no reading"
@@ -706,10 +724,10 @@ def render_live_monitoring():
                         unsafe_allow_html=True)
 
             # Same sensor channel, same live table -- Irr_N's paired Temp_N,
-            # if the live feed has one. .get() rather than [] since not
-            # every deployment necessarily carries a Temp_ column per sensor.
+            # forward-filled above to the most recently known value rather
+            # than only this exact tick.
             temp_col = "Temp_" + col.split("_", 1)[1]
-            temp_val = pd.to_numeric(latest.get(temp_col), errors="coerce")
+            temp_val = temp_latest.get(temp_col)
             has_temp = pd.notna(temp_val)
 
             irr_val_col, temp_val_col = st.columns([3, 2])
