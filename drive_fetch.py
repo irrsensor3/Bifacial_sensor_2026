@@ -305,7 +305,7 @@ def _find_csvs_anywhere(service, root_folder_id):
     return csv_files
 
 
-@st.cache_data(ttl=1800)
+@st.cache_data(ttl=300)
 def list_available_csvs():
     """
     Returns only irradiance CSV files located inside a valid
@@ -537,7 +537,7 @@ def download_and_combine_csvs(file_entries: tuple) -> pd.DataFrame:
 # ones above.
 # =========================
 
-@st.cache_data(ttl=1800)
+@st.cache_data(ttl=300)
 def list_available_dcm_csvs(include_avg=False):
     """
     Returns DCM 3366 CSV files under panel-meter-data.
@@ -888,7 +888,7 @@ def _build_filled_frame(df_filled: pd.DataFrame, df_flags=None) -> pd.DataFrame:
     return out.dropna(subset=["created_at"]).reset_index(drop=True)
 
 
-@st.cache_data(ttl=1800)
+@st.cache_data(ttl=300)
 def list_available_filled_csvs():
     """
     Returns the gap-filled irradiance CSVs in the OUTPUT folder, newest
