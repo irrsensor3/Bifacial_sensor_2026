@@ -1,13 +1,15 @@
 import io
 import re
+import time
 from datetime import date, datetime
+from http.client import HTTPException
 
 import pandas as pd
 import streamlit as st
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaIoBaseDownload
-import time
 
 # The Drive folder rclone syncs your CSVs into (see: rclone sync
 # "/home/skyimager5/Desktop/bifacial data" gdrive:bifacial-data)
@@ -40,6 +42,23 @@ FILLED_FLAG_SUFFIX = "__filled"
 
 SCOPES = ["https://www.googleapis.com/auth/drive.readonly"]
 
+# HTTP statuses worth a retry. 403 is ambiguous on Drive: it covers both
+# rate limiting and permission denied, so a genuine permission problem
+# burns the full backoff before surfacing. That costs ~14s once, which is
+# cheaper than the alternative of never retrying a rate limit.
+RETRYABLE_STATUS = {403, 429, 500, 502, 503, 504}
+
+
+class DriveListingError(RuntimeError):
+    """A listing could not be completed.
+
+    The point of this class is that it is RAISED out of the cached
+    listing functions rather than turned into an empty list. Streamlit
+    caches return values, not exceptions, so a failed run leaves the
+    cache untouched and the next rerun retries — instead of serving
+    "no files found" for the full 300s TTL.
+    """
+
 
 @st.cache_resource
 def _get_drive_service():
@@ -54,26 +73,75 @@ def _get_drive_service():
     return build("drive", "v3", credentials=credentials)
 
 
+def service_account_email() -> str:
+    """The client_email from secrets, for "did you share the folder with
+    this address?" checks in the diagnostics."""
+    try:
+        return str(st.secrets["gcp_service_account"].get("client_email", "unknown"))
+    except Exception:
+        return "unknown"
+
+
+def _drive_execute(request, attempts: int = 4):
+    """Execute one Drive API request, retrying transient failures with
+    exponential backoff (1s, 2s, 4s).
+
+    Without this, a single hiccup anywhere in a folder walk aborts the
+    whole walk. Non-retryable errors (404, 401, malformed query) are
+    re-raised immediately so real problems still surface fast.
+    """
+    for attempt in range(attempts):
+        try:
+            return request.execute()
+        except HttpError as e:
+            status = getattr(getattr(e, "resp", None), "status", None)
+            if status not in RETRYABLE_STATUS or attempt == attempts - 1:
+                raise
+            time.sleep(2 ** attempt)
+        except (OSError, HTTPException):
+            # Socket timeouts, dropped connections, SSL errors, incomplete
+            # reads. All transient by nature.
+            if attempt == attempts - 1:
+                raise
+            time.sleep(2 ** attempt)
+
+
 def _escape_drive_name(name: str) -> str:
     """Drive query strings are single-quoted, so a name containing a quote
     or backslash has to be escaped or the query is rejected."""
     return str(name).replace("\\", "\\\\").replace("'", "\\'")
 
 
-def _get_folder_id(service, folder_name=DRIVE_FOLDER_NAME):
-    """Looks up the Drive folder ID by name. Assumes the folder name
-    is unique enough (top-level, shared directly with the service
-    account) — takes the first match."""
+def _get_folder_ids(service, folder_name=DRIVE_FOLDER_NAME):
+    """EVERY visible folder with this name, not just the first match.
+
+    The old version took files[0]. Drive does not guarantee ordering on
+    an unsorted list call, so if the service account can see two folders
+    with the same name (a duplicate, an old copy, a re-share) the walk
+    picks a different one at random each time the cache expires — which
+    looks exactly like intermittent failure. Walking all matches and
+    unioning by file ID makes that case harmless.
+    """
     query = (
         f"name = '{_escape_drive_name(folder_name)}' and "
         "mimeType = 'application/vnd.google-apps.folder' and "
         "trashed = false"
     )
-    res = service.files().list(q=query, fields="files(id, name)").execute()
-    files = res.get("files", [])
-    if not files:
-        return None
-    return files[0]["id"]
+    res = _drive_execute(
+        service.files().list(
+            q=query,
+            fields="files(id, name, parents, owners(emailAddress))",
+            pageSize=100,
+        )
+    )
+    return res.get("files", [])
+
+
+def _get_folder_id(service, folder_name=DRIVE_FOLDER_NAME):
+    """First matching folder ID, or None. Kept for the callers that only
+    need one (the OUTPUT fallback below)."""
+    folders = _get_folder_ids(service, folder_name)
+    return folders[0]["id"] if folders else None
 
 
 def _resolve_folder_path(service, path_parts):
@@ -95,9 +163,9 @@ def _resolve_folder_path(service, path_parts):
         )
         if folder_id:
             query += f" and '{folder_id}' in parents"
-        res = service.files().list(
-            q=query, fields="files(id, name)", pageSize=10
-        ).execute()
+        res = _drive_execute(
+            service.files().list(q=query, fields="files(id, name)", pageSize=10)
+        )
         files = res.get("files", [])
         if not files:
             return None
@@ -136,15 +204,13 @@ def _list_children(service, folder_id):
     entries = []
     page_token = None
     while True:
-        res = (
-            service.files()
-            .list(
+        res = _drive_execute(
+            service.files().list(
                 q=f"'{folder_id}' in parents and trashed = false",
                 fields="nextPageToken, files(id, name, mimeType, modifiedTime)",
                 pageSize=1000,
                 pageToken=page_token,
             )
-            .execute()
         )
         entries.extend(res.get("files", []))
         page_token = res.get("nextPageToken")
@@ -152,7 +218,7 @@ def _list_children(service, folder_id):
             return entries
 
 
-def _find_all_csvs_recursive(service, root_folder_id):
+def _find_all_csvs_recursive(service, root_folder_id, stats=None):
     """
     Walk through the Drive folder tree and collect ONLY CSV files that
     belong to a valid year/month folder structure.
@@ -172,20 +238,12 @@ def _find_all_csvs_recursive(service, root_folder_id):
 
     CSV files outside a year/month structure are ignored.
 
-    Example:
-
-        bifacial-data/
-            2026/
-                08/
-                    Bifacial_2026-08-23.csv     <-- INCLUDED
-            alerts.csv                         <-- IGNORED
-
-        panel-meter-data/
-            dcm_3366/
-                2026/
-                    08/
-                        2026-08-23.csv         <-- INCLUDED
-            alerts.csv                         <-- IGNORED
+    stats, when passed, is a dict this fills in for the diagnostics:
+    how many folders were visited, how many CSVs were seen, and a sample
+    of the paths that were rejected. Rejection is the quietest failure
+    mode here — a correct walk over a correctly-shared folder still
+    returns nothing if the layout isn't <year>/<month> — so it needs to
+    be visible somewhere.
     """
 
     csv_files = []
@@ -196,6 +254,9 @@ def _find_all_csvs_recursive(service, root_folder_id):
 
     while folders_to_search:
         current_id, path_parts = folders_to_search.pop()
+
+        if stats is not None:
+            stats["folders_visited"] = stats.get("folders_visited", 0) + 1
 
         for entry in _list_children(service, current_id):
 
@@ -217,7 +278,19 @@ def _find_all_csvs_recursive(service, root_folder_id):
             # Ignore anything that isn't CSV
             # ---------------------------------------------------------
             if not entry["name"].lower().endswith(".csv"):
+                if stats is not None:
+                    if entry["mimeType"] == "application/vnd.google-apps.shortcut":
+                        # Shortcuts are neither folder nor file to this
+                        # walk, so a tree reached through one looks empty.
+                        stats.setdefault("shortcuts", []).append(
+                            "/".join(path_parts + [entry["name"]])
+                        )
+                    else:
+                        stats["non_csv_seen"] = stats.get("non_csv_seen", 0) + 1
                 continue
+
+            if stats is not None:
+                stats["csvs_seen"] = stats.get("csvs_seen", 0) + 1
 
             # ---------------------------------------------------------
             # Check whether this CSV is inside:
@@ -263,6 +336,11 @@ def _find_all_csvs_recursive(service, root_folder_id):
             # Ignore it completely.
             # ---------------------------------------------------------
             if not valid_year_month:
+                if stats is not None:
+                    stats["csvs_rejected"] = stats.get("csvs_rejected", 0) + 1
+                    sample = stats.setdefault("rejected_sample", [])
+                    if len(sample) < 10:
+                        sample.append("/".join(path_parts + [entry["name"]]))
                 continue
 
             # ---------------------------------------------------------
@@ -274,6 +352,9 @@ def _find_all_csvs_recursive(service, root_folder_id):
             entry["data_date"] = _date_from_name(entry["name"])
 
             csv_files.append(entry)
+
+    if stats is not None:
+        stats["csvs_accepted"] = stats.get("csvs_accepted", 0) + len(csv_files)
 
     return csv_files
 
@@ -305,8 +386,23 @@ def _find_csvs_anywhere(service, root_folder_id):
     return csv_files
 
 
+# ============================================================
+# IRRADIANCE LISTING (bifacial-data)
+#
+# Split in two on purpose:
+#
+#   _list_available_csvs_cached   cached, RAISES on any failure
+#   list_available_csvs           uncached, catches and reports
+#
+# Reporting has to live outside the cache. Writing to st.session_state
+# inside a cached function only runs on a cache MISS, so on a hit the
+# error text is never refreshed — and st.cache_data is global while
+# session_state is per-session, so a second browser session hitting a
+# cached result sees no error at all.
+# ============================================================
+
 @st.cache_data(ttl=300)
-def list_available_csvs():
+def _list_available_csvs_cached():
     """
     Returns only irradiance CSV files located inside a valid
     year/month folder structure under bifacial-data.
@@ -318,32 +414,56 @@ def list_available_csvs():
     Example ignored:
 
         bifacial-data/alerts.csv
-        bifacial-data/something.csv
         bifacial-data/2026/alerts.csv
+
+    Raises DriveListingError rather than returning [] so a failure is
+    never cached as a legitimate "no files" answer.
     """
+    service = _get_drive_service()
 
+    folders = _get_folder_ids(service, DRIVE_FOLDER_NAME)
+    if not folders:
+        raise DriveListingError(
+            f"No folder named {DRIVE_FOLDER_NAME!r} is visible to the service "
+            f"account ({service_account_email()}). Check that the folder "
+            "exists, isn't trashed, and is shared with that address."
+        )
+
+    stats = {}
+    files, seen = [], set()
+    for folder in folders:
+        for entry in _find_all_csvs_recursive(service, folder["id"], stats=stats):
+            if entry["id"] not in seen:
+                seen.add(entry["id"])
+                files.append(entry)
+
+    if not files:
+        raise DriveListingError(
+            f"Walked {len(folders)} folder(s) named {DRIVE_FOLDER_NAME!r} "
+            f"({stats.get('folders_visited', 0)} subfolders, "
+            f"{stats.get('csvs_seen', 0)} CSVs seen) but none sat inside a "
+            f"<year>/<month> structure. Rejected: "
+            f"{stats.get('csvs_rejected', 0)}. Run the Drive diagnostics for "
+            "the rejected paths."
+        )
+
+    files.sort(
+        key=lambda f: f.get("modifiedTime", ""),
+        reverse=True,
+    )
+
+    return files
+
+
+def list_available_csvs():
+    """Irradiance CSVs, newest first. Returns [] on failure and puts the
+    reason in st.session_state['_drive_list_error']."""
     try:
-        service = _get_drive_service()
-
-        folder_id = _get_folder_id(service, DRIVE_FOLDER_NAME)
-
-        if folder_id is None:
-            return []
-
-        files = _find_all_csvs_recursive(
-            service,
-            folder_id,
-        )
-
-        files.sort(
-            key=lambda f: f.get("modifiedTime", ""),
-            reverse=True,
-        )
-
+        files = _list_available_csvs_cached()
+        st.session_state["_drive_list_error"] = None
         return files
-
     except Exception as e:
-        st.session_state["_drive_list_error"] = str(e)
+        st.session_state["_drive_list_error"] = f"{type(e).__name__}: {e}"
         return []
 
 
@@ -495,13 +615,16 @@ def download_and_combine_csvs(file_entries: tuple) -> pd.DataFrame:
     This is important because if today's CSV changes, only that CSV
     needs to be downloaded again. Previously downloaded historical
     CSVs remain cached.
+
+    Failures are recorded in st.session_state['_drive_download_errors']
+    so a partially-loaded range doesn't look like a complete one.
     """
 
     if not file_entries:
         return pd.DataFrame()
 
-
     dfs = []
+    errors = []
 
     for file_id, modified_time in file_entries:
 
@@ -515,9 +638,13 @@ def download_and_combine_csvs(file_entries: tuple) -> pd.DataFrame:
             if df is not None and not df.empty:
                 dfs.append(df)
 
-        except Exception:
-            # One failed file should not kill the application.
+        except Exception as e:
+            # One failed file should not kill the application, but it
+            # should not vanish either.
+            errors.append(f"{file_id}: {type(e).__name__}: {e}")
             continue
+
+    st.session_state["_drive_download_errors"] = errors
 
     if not dfs:
         return pd.DataFrame()
@@ -538,7 +665,7 @@ def download_and_combine_csvs(file_entries: tuple) -> pd.DataFrame:
 # =========================
 
 @st.cache_data(ttl=300)
-def list_available_dcm_csvs(include_avg=False):
+def _list_available_dcm_csvs_cached(include_avg=False):
     """
     Returns DCM 3366 CSV files under panel-meter-data.
 
@@ -555,63 +682,84 @@ def list_available_dcm_csvs(include_avg=False):
 
         Average:
             2026-08-23_dcm_3366_bifaical_avg.csv
+
+    Raises DriveListingError when the folder or its year/month contents
+    can't be found. An empty result AFTER the dcm_3366/avg filter is a
+    legitimate answer (that kind of file may genuinely not exist), so
+    that case returns [] instead.
     """
+    service = _get_drive_service()
 
+    folders = _get_folder_ids(service, DCM_DRIVE_FOLDER_NAME)
+    if not folders:
+        raise DriveListingError(
+            f"No folder named {DCM_DRIVE_FOLDER_NAME!r} is visible to the "
+            f"service account ({service_account_email()})."
+        )
+
+    stats = {}
+    all_files, seen = [], set()
+    for folder in folders:
+        for entry in _find_all_csvs_recursive(service, folder["id"], stats=stats):
+            if entry["id"] not in seen:
+                seen.add(entry["id"])
+                all_files.append(entry)
+
+    if not all_files:
+        raise DriveListingError(
+            f"Walked {len(folders)} folder(s) named {DCM_DRIVE_FOLDER_NAME!r} "
+            f"({stats.get('folders_visited', 0)} subfolders, "
+            f"{stats.get('csvs_seen', 0)} CSVs seen) but none sat inside a "
+            "<year>/<month> structure."
+        )
+
+    files = []
+
+    for f in all_files:
+
+        name = f.get("name", "").lower()
+
+        # Must be CSV
+        if not name.endswith(".csv"):
+            continue
+
+        # Must be DCM 3366
+        if "_dcm_3366_" not in name:
+            continue
+
+        # Must begin with YYYY-MM-DD
+        if not re.match(r"^\d{4}-\d{2}-\d{2}_", name):
+            continue
+
+        is_avg = "_avg.csv" in name
+
+        # Select either normal or average files
+        if include_avg:
+            if not is_avg:
+                continue
+        else:
+            if is_avg:
+                continue
+
+        files.append(f)
+
+    files.sort(
+        key=lambda f: f.get("modifiedTime", ""),
+        reverse=True,
+    )
+
+    return files
+
+
+def list_available_dcm_csvs(include_avg=False):
+    """DC-meter CSVs, newest first. Returns [] on failure and puts the
+    reason in st.session_state['_dcm_drive_list_error']."""
     try:
-        service = _get_drive_service()
-
-        folder_id = _get_folder_id(
-            service,
-            DCM_DRIVE_FOLDER_NAME
-        )
-
-        if folder_id is None:
-            return []
-
-        all_files = _find_all_csvs_recursive(
-            service,
-            folder_id
-        )
-
-        files = []
-
-        for f in all_files:
-
-            name = f.get("name", "").lower()
-
-            # Must be CSV
-            if not name.endswith(".csv"):
-                continue
-
-            # Must be DCM 3366
-            if "_dcm_3366_" not in name:
-                continue
-
-            # Must begin with YYYY-MM-DD
-            if not re.match(r"^\d{4}-\d{2}-\d{2}_", name):
-                continue
-
-            is_avg = "_avg.csv" in name
-
-            # Select either normal or average files
-            if include_avg:
-                if not is_avg:
-                    continue
-            else:
-                if is_avg:
-                    continue
-
-            files.append(f)
-
-        files.sort(
-            key=lambda f: f.get("modifiedTime", ""),
-            reverse=True,
-        )
-
+        files = _list_available_dcm_csvs_cached(include_avg)
+        st.session_state["_dcm_drive_list_error"] = None
         return files
-
     except Exception as e:
-        st.session_state["_dcm_drive_list_error"] = str(e)
+        st.session_state["_dcm_drive_list_error"] = f"{type(e).__name__}: {e}"
         return []
 
 
@@ -707,6 +855,7 @@ def download_and_combine_dcm_csvs(file_entries: tuple) -> pd.DataFrame:
         return pd.DataFrame()
 
     dfs = []
+    errors = []
 
     for file_id, modified_time in file_entries:
         try:
@@ -718,9 +867,12 @@ def download_and_combine_dcm_csvs(file_entries: tuple) -> pd.DataFrame:
             if df is not None and not df.empty:
                 dfs.append(df)
 
-        except Exception:
+        except Exception as e:
             # One failed file should not kill the application.
+            errors.append(f"{file_id}: {type(e).__name__}: {e}")
             continue
+
+    st.session_state["_dcm_download_errors"] = errors
 
     if not dfs:
         return pd.DataFrame()
@@ -889,7 +1041,7 @@ def _build_filled_frame(df_filled: pd.DataFrame, df_flags=None) -> pd.DataFrame:
 
 
 @st.cache_data(ttl=300)
-def list_available_filled_csvs():
+def _list_available_filled_csvs_cached():
     """
     Returns the gap-filled irradiance CSVs in the OUTPUT folder, newest
     first, each carrying:
@@ -901,55 +1053,68 @@ def list_available_filled_csvs():
         flags_modified  that file's modifiedTime, for cache keying
 
     A filled file with no matching flags file is still returned.
+    Raises DriveListingError rather than returning [].
     """
+    service = _get_drive_service()
+
+    folder_id = _resolve_folder_path(service, FILLED_DRIVE_FOLDER_PATH)
+    if folder_id is None:
+        # The service account may have been given OUTPUT directly,
+        # in which case its parent is invisible and the path walk
+        # above can't succeed. Fall back to the leaf name.
+        folder_id = _get_folder_id(service, FILLED_DRIVE_FOLDER_PATH[-1])
+    if folder_id is None:
+        raise DriveListingError(
+            "Couldn't find the folder "
+            f"{'/'.join(FILLED_DRIVE_FOLDER_PATH)} in Drive. Share it "
+            f"with the service account ({service_account_email()})."
+        )
+
+    all_csvs = _find_csvs_anywhere(service, folder_id)
+
+    flags_by_date = {}
+    filled_files = []
+    for entry in all_csvs:
+        name = str(entry.get("name", ""))
+        data_date = entry.get("data_date")
+        if data_date is None:
+            continue
+        lowered = name.lower()
+        if lowered.startswith(FLAGS_PREFIX):
+            flags_by_date[data_date] = entry
+        elif lowered.startswith(FILLED_PREFIX):
+            filled_files.append(entry)
+
+    if not filled_files:
+        raise DriveListingError(
+            f"Found {len(all_csvs)} CSV(s) under "
+            f"{'/'.join(FILLED_DRIVE_FOLDER_PATH)} but none named "
+            f"{FILLED_PREFIX}<date>.csv."
+        )
+
+    out = []
+    for entry in filled_files:
+        data_date = entry["data_date"]
+        enriched = dict(entry)
+        enriched["folder_path"] = [f"{data_date.year:04d}", f"{data_date.month:02d}"]
+        flags = flags_by_date.get(data_date)
+        enriched["flags_id"] = flags["id"] if flags else None
+        enriched["flags_modified"] = flags.get("modifiedTime", "") if flags else ""
+        out.append(enriched)
+
+    out.sort(key=lambda f: f["data_date"], reverse=True)
+    return out
+
+
+def list_available_filled_csvs():
+    """Gap-filled CSVs, newest first. Returns [] on failure and puts the
+    reason in st.session_state['_filled_drive_list_error']."""
     try:
-        service = _get_drive_service()
-
-        folder_id = _resolve_folder_path(service, FILLED_DRIVE_FOLDER_PATH)
-        if folder_id is None:
-            # The service account may have been given OUTPUT directly,
-            # in which case its parent is invisible and the path walk
-            # above can't succeed. Fall back to the leaf name.
-            folder_id = _get_folder_id(service, FILLED_DRIVE_FOLDER_PATH[-1])
-        if folder_id is None:
-            st.session_state["_filled_drive_list_error"] = (
-                "Couldn't find the folder "
-                f"{'/'.join(FILLED_DRIVE_FOLDER_PATH)} in Drive. Share it "
-                "with the service account in secrets.toml (client_email)."
-            )
-            return []
-
-        all_csvs = _find_csvs_anywhere(service, folder_id)
-
-        flags_by_date = {}
-        filled_files = []
-        for entry in all_csvs:
-            name = str(entry.get("name", ""))
-            data_date = entry.get("data_date")
-            if data_date is None:
-                continue
-            lowered = name.lower()
-            if lowered.startswith(FLAGS_PREFIX):
-                flags_by_date[data_date] = entry
-            elif lowered.startswith(FILLED_PREFIX):
-                filled_files.append(entry)
-
-        out = []
-        for entry in filled_files:
-            data_date = entry["data_date"]
-            enriched = dict(entry)
-            enriched["folder_path"] = [f"{data_date.year:04d}", f"{data_date.month:02d}"]
-            flags = flags_by_date.get(data_date)
-            enriched["flags_id"] = flags["id"] if flags else None
-            enriched["flags_modified"] = flags.get("modifiedTime", "") if flags else ""
-            out.append(enriched)
-
-        out.sort(key=lambda f: f["data_date"], reverse=True)
+        files = _list_available_filled_csvs_cached()
         st.session_state["_filled_drive_list_error"] = None
-        return out
-
+        return files
     except Exception as e:
-        st.session_state["_filled_drive_list_error"] = str(e)
+        st.session_state["_filled_drive_list_error"] = f"{type(e).__name__}: {e}"
         return []
 
 
@@ -1002,6 +1167,7 @@ def download_and_combine_filled_csvs(file_entries: tuple) -> pd.DataFrame:
     }
 
     dfs = []
+    errors = []
     for file_id, modified_time in file_entries:
         flags_id, flags_modified = flags_by_file_id.get(file_id, ("", ""))
         try:
@@ -1013,9 +1179,12 @@ def download_and_combine_filled_csvs(file_entries: tuple) -> pd.DataFrame:
             )
             if df is not None and not df.empty:
                 dfs.append(df)
-        except Exception:
+        except Exception as e:
             # One failed file should not kill the application.
+            errors.append(f"{file_id}: {type(e).__name__}: {e}")
             continue
+
+    st.session_state["_filled_download_errors"] = errors
 
     if not dfs:
         return pd.DataFrame()
@@ -1029,3 +1198,167 @@ def download_and_combine_filled_csvs(file_entries: tuple) -> pd.DataFrame:
             combined[column] = combined[column].fillna(False).astype(bool)
 
     return combined
+
+
+# =========================
+# DIAGNOSTICS
+#
+# Everything here bypasses the caches on purpose: it answers "what does
+# Drive say RIGHT NOW", which is the one question a cached listing can't.
+# =========================
+
+def diagnose_drive(folder_name=DRIVE_FOLDER_NAME) -> str:
+    """A plain-text report on what the service account can actually see
+    under folder_name. Nothing here is cached.
+
+    Distinguishes the three failure modes that all produce an empty
+    dropdown:
+
+        1. folder not found / not shared      -> no matches listed
+        2. duplicate folders                  -> more than one match
+        3. layout doesn't match <year>/<month> -> CSVs seen, 0 accepted
+    """
+    lines = []
+    add = lines.append
+
+    add(f"=== Drive diagnostics: {folder_name!r} ===")
+    add(f"time: {datetime.now().isoformat(timespec='seconds')}")
+    add(f"service account: {service_account_email()}")
+    add("")
+
+    try:
+        service = _get_drive_service()
+    except Exception as e:
+        add(f"FAILED to build Drive client: {type(e).__name__}: {e}")
+        add("Check the [gcp_service_account] block in secrets.toml.")
+        return "\n".join(lines)
+
+    try:
+        folders = _get_folder_ids(service, folder_name)
+    except Exception as e:
+        add(f"FAILED name lookup: {type(e).__name__}: {e}")
+        return "\n".join(lines)
+
+    add(f"folders matching that name: {len(folders)}")
+    for f in folders:
+        owners = ", ".join(
+            o.get("emailAddress", "?") for o in (f.get("owners") or [])
+        )
+        add(f"  id={f['id']}  parents={f.get('parents')}  owners={owners or '?'}")
+
+    if not folders:
+        add("")
+        add("=> Nothing with that name is visible. Either the name is wrong,")
+        add("   the folder is trashed, or it was never shared with the")
+        add("   service account address above.")
+        return "\n".join(lines)
+
+    if len(folders) > 1:
+        add("")
+        add("=> MORE THAN ONE match. Drive does not guarantee ordering on")
+        add("   an unsorted list call, so the old files[0] lookup picked a")
+        add("   different one at random each time the cache expired. That")
+        add("   alone explains intermittent empty dropdowns.")
+
+    add("")
+    for f in folders:
+        add(f"--- walking {f['id']} ---")
+        stats = {}
+        try:
+            found = _find_all_csvs_recursive(service, f["id"], stats=stats)
+        except Exception as e:
+            add(f"  WALK FAILED: {type(e).__name__}: {e}")
+            status = getattr(getattr(e, "resp", None), "status", None)
+            if status is not None:
+                add(f"  http status: {status}")
+            continue
+
+        add(f"  subfolders visited: {stats.get('folders_visited', 0)}")
+        add(f"  CSVs seen:          {stats.get('csvs_seen', 0)}")
+        add(f"  CSVs accepted:      {len(found)}")
+        add(f"  CSVs rejected:      {stats.get('csvs_rejected', 0)}")
+        add(f"  non-CSV files:      {stats.get('non_csv_seen', 0)}")
+
+        shortcuts = stats.get("shortcuts") or []
+        if shortcuts:
+            add(f"  SHORTCUTS ({len(shortcuts)}) — the walk cannot follow these:")
+            for s in shortcuts[:5]:
+                add(f"    {s}")
+
+        rejected = stats.get("rejected_sample") or []
+        if rejected:
+            add("  rejected sample (not inside <year>/<month>):")
+            for r in rejected:
+                add(f"    {r}")
+
+        if found:
+            add("  accepted sample:")
+            for entry in found[:5]:
+                path = "/".join(entry.get("folder_path") or [])
+                add(f"    {path}/{entry['name']}  modified={entry.get('modifiedTime')}")
+
+    add("")
+    add("If 'CSVs seen' is high and 'CSVs accepted' is 0, the folder layout")
+    add("is the problem, not access or rate limits.")
+
+    return "\n".join(lines)
+
+
+def render_drive_diagnostics():
+    """Sidebar/expander widget wrapping diagnose_drive for all three
+    folders, plus a cache-clear button.
+
+    Drop `render_drive_diagnostics()` anywhere in the app (the sidebar is
+    a good spot) and re-run it the moment the dropdown comes up empty.
+    """
+    with st.expander("Drive diagnostics", expanded=False):
+        for key, label in [
+            ("_drive_list_error", "irradiance listing"),
+            ("_dcm_drive_list_error", "DC meter listing"),
+            ("_filled_drive_list_error", "gap-filled listing"),
+        ]:
+            err = st.session_state.get(key)
+            if err:
+                st.error(f"{label}: {err}")
+
+        for key, label in [
+            ("_drive_download_errors", "irradiance downloads"),
+            ("_dcm_download_errors", "DC meter downloads"),
+            ("_filled_download_errors", "gap-filled downloads"),
+        ]:
+            errs = st.session_state.get(key) or []
+            if errs:
+                st.warning(f"{label}: {len(errs)} file(s) failed")
+                st.code("\n".join(errs[:10]))
+
+        target = st.selectbox(
+            "Folder to probe",
+            [DRIVE_FOLDER_NAME, DCM_DRIVE_FOLDER_NAME, FILLED_DRIVE_FOLDER_PATH[-1]],
+        )
+
+        col_a, col_b = st.columns(2)
+
+        with col_a:
+            if st.button("Run diagnostics", use_container_width=True):
+                with st.spinner("Asking Drive..."):
+                    st.session_state["_drive_diag_report"] = diagnose_drive(target)
+
+        with col_b:
+            if st.button("Clear caches & rerun", use_container_width=True):
+                # Clears the 300s listing caches so the next call really
+                # hits Drive. Downloads are keyed on modifiedTime and are
+                # left alone.
+                _list_available_csvs_cached.clear()
+                _list_available_dcm_csvs_cached.clear()
+                _list_available_filled_csvs_cached.clear()
+                st.rerun()
+
+        report = st.session_state.get("_drive_diag_report")
+        if report:
+            st.code(report, language="text")
+            st.download_button(
+                "Download report",
+                report,
+                file_name="drive_diagnostics.txt",
+                use_container_width=True,
+            )
