@@ -5,6 +5,7 @@ from ui_sections import (
     page_stamp,
     supabase,
 )
+from Gap_Filling import render_gap_filling
 
 TILT_PANEL_COUNT = 24
 DEFAULT_TILT_DEG = 10.0
@@ -117,6 +118,15 @@ def render_admin_controls():
                 )
         except Exception as exc:
             st.error(f"Could not reach the database: {exc}")
+
+    # -------------------------
+    # Gap filling
+    # -------------------------
+    # The machine learning model, runnable from the browser rather than only
+    # from a notebook. Placed here because training is expensive and should not
+    # be startable by a guest.
+    st.divider()
+    render_gap_filling()
 
     # -------------------------
     # Panel tilt configuration

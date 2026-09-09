@@ -132,6 +132,14 @@ MAX_ITER = 1500
 LEARNING_RATE = 0.05
 MAX_LEAF_NODES = 63
 MIN_PEERS_TO_PREDICT = 1
+# Longest hole interpolation is allowed to close. A straight line between the
+# reading before an outage and the reading after it looks like data and is not:
+# 756 W/m2 falling to 0 over 38 minutes is drawn as a clean diagonal ramp that
+# no instrument saw. The model is already barred from these stretches by
+# MIN_PEERS_TO_PREDICT, since an outage that stops the logger stops every
+# channel; without this cap, interpolation walked straight through the same
+# hole. Beyond the cap the gap is left open and flagged empty.
+MAX_INTERP_MINUTES = 30.0
 LAG_STEPS = (-11, -1, 1, 11)
 BUCKET_SPLIT_MINUTES = 15
 SHORT_BUCKET_MINUTES = (1, 3, 8, 15)
@@ -925,6 +933,17 @@ def _hgb():
 
 
 def fit_family(long):
+    """Fit one channel family, degrading rather than failing.
+
+    A training failure in one family used to abort the entire run. It should
+    not: the other families are unaffected, and a family without a model still
+    gets its gaps filled by interpolation, which for short gaps is often the
+    better method anyway.
+
+    The retry drops early stopping. On some sklearn and numpy combinations the
+    early-stopping path raises "window shape cannot be larger than input array
+    shape" from inside a worker, and a plain fit succeeds on the same data.
+    """
     X, y = long["X"], long["y"]
     ok = np.isfinite(y) & long["trainable"] & np.isfinite(X).any(axis=1)
     idx = np.where(ok)[0]
@@ -932,7 +951,23 @@ def fit_family(long):
         return None
     if len(idx) > MAX_TRAIN_ROWS:
         idx = np.sort(np.random.default_rng(RANDOM_STATE).choice(idx, MAX_TRAIN_ROWS, False))
-    return _hgb().fit(X[idx], y[idx])
+
+    try:
+        return _hgb().fit(X[idx], y[idx])
+    except Exception as exc:
+        print(f"  [FIT] first attempt failed ({exc}); retrying without early stopping")
+
+    try:
+        m = HistGradientBoostingRegressor(
+            loss="absolute_error", max_iter=min(MAX_ITER, 300),
+            learning_rate=LEARNING_RATE, max_leaf_nodes=MAX_LEAF_NODES,
+            min_samples_leaf=40, l2_regularization=1.0,
+            early_stopping=False, random_state=RANDOM_STATE)
+        return m.fit(X[idx], y[idx])
+    except Exception as exc:
+        print(f"  [FIT] no model for this family ({exc}); "
+              f"its gaps will be filled by interpolation")
+        return None
 
 
 def runs_of_true(mask):
@@ -974,9 +1009,31 @@ def model_fill(grid, found, fam, feats, gapmask, model, blocked=None):
     return {cols[p]: flat[j::k] for j, p in enumerate(panels)}, long
 
 
-def interp_fill(grid, found, fam):
-    return {c: grid[c].interpolate(method="time", limit_area="inside").values
-            for c in found.get(fam, {}).values()}
+def interp_fill(grid, found, fam, interval_s=None, max_minutes=None):
+    """Interpolate inside gaps, but refuse holes longer than max_minutes.
+
+    limit_area="inside" already stops it running off either end of the record.
+    What it does not stop is a single straight line spanning an hour, which is
+    the shape an outage produces and the shape least likely to be true.
+    """
+    out, declined = {}, 0
+    limit = None
+    if max_minutes and interval_s:
+        limit = max(1, int(round(float(max_minutes) * 60.0 / float(interval_s))))
+    for c in found.get(fam, {}).values():
+        s = grid[c]
+        vals = s.interpolate(method="time", limit_area="inside").values.copy()
+        if limit is not None:
+            missing = s.isna().values
+            for a, b in runs_of_true(missing):
+                if b - a > limit:
+                    vals[a:b] = np.nan
+                    declined += b - a
+        out[c] = vals
+    if declined:
+        print(f"  [{fam}] {declined:,} cell(s) left empty: hole longer than "
+              f"{max_minutes:g} min, too long to interpolate honestly")
+    return out
 
 
 def combine(grid, found, fam, interp, modelled, gapmask, interval_s, decisions=None):
@@ -1287,6 +1344,233 @@ def write_outputs(grid, found, prov, filled, out_dir, summary, column_order):
 # =============================================================================
 #  MAIN
 # =============================================================================
+
+def run_in_memory(data_root, progress=None, max_iter=None, min_hours=None,
+                  max_interp_minutes=MAX_INTERP_MINUTES, exclude_sensors=()):
+    """Run the pipeline and return results instead of writing files.
+
+    main() prints to a console and writes to disk, which suits a Colab notebook
+    but not a web page. This does the same work and hands back the filled grid,
+    the accuracy table and a summary, so a caller can display them.
+
+    `progress` is an optional callable taking (fraction, message) so a page can
+    show where it has got to. Nothing here touches Streamlit, so the function
+    stays usable from a plain script.
+    """
+    def say(f, m):
+        if progress:
+            progress(f, m)
+
+    say(0.05, "Reading files")
+    wide, found, load_rep = load_all(data_root)
+    if wide is None or wide.empty:
+        raise ValueError("No usable rows found in that folder.")
+
+    # Positions to keep out of the model entirely.
+    #
+    # A channel on the bench is not a peer. When somebody is testing a sensor
+    # indoors under a lamp, its column still fills with numbers, and the model
+    # treats them as another view of the same sky: on 31 Aug the two bench
+    # channels held 920 W/m2 while the three roof sensors read under 1, and
+    # that was the only reason a fill was attempted at all -- one measured peer
+    # is enough to clear MIN_PEERS_TO_PREDICT. The predictions came out near
+    # 128 W/m2 against a last real reading of 0.05.
+    #
+    # Excluded columns are dropped from `found` before anything else touches
+    # it, so they are not peers, not training rows, not filled, and not counted
+    # in the channel tally. Their raw values still reach the output file,
+    # flagged as recorded -- excluding a channel from the model is not a reason
+    # to withhold what the logger wrote.
+    excluded_cols = []
+    if exclude_sensors:
+        drop = {int(s) for s in exclude_sensors}
+        for fam in list(found):
+            for panel in list(found[fam]):
+                if panel in drop:
+                    excluded_cols.append(found[fam].pop(panel))
+            if not found[fam]:
+                del found[fam]
+        if not found:
+            raise ValueError(
+                "Every channel was excluded. Leave at least one sensor in.")
+        print(f"[EXCLUDE] {len(excluded_cols)} channel(s) held out of the model: "
+              f"{', '.join(sorted(excluded_cols))}")
+
+    interval_s = detect_interval(wide.index)
+    grid = to_grid(wide, interval_s)
+    feats = solar_features(grid.index)
+    grid, fault_rep, prov = mark_faults(grid, found)
+    before = grid.copy()
+
+    say(0.20, "Checking data quality")
+    # A caller may relax the daily minimum. Useful for a partial day -- the
+    # current one, or a day the logger was restarted -- where an hour of data
+    # is still worth reconstructing even if it is thin for training.
+    saved_min = globals().get("MIN_USABLE_HOURS")
+    if min_hours is not None:
+        globals()["MIN_USABLE_HOURS"] = float(min_hours)
+    try:
+        usable_days, dropped_days, blocked, val_table = validate_data(
+            grid, found, prov, interval_s)
+    finally:
+        if min_hours is not None and saved_min is not None:
+            globals()["MIN_USABLE_HOURS"] = saved_min
+    if not usable_days:
+        # Say what was actually found. "Not enough usable data" is true but
+        # tells nobody whether the file was short, the channels were dead, or
+        # the threshold was simply close.
+        detail = ""
+        try:
+            if val_table is not None and len(val_table):
+                t = val_table.copy()
+                cols = [c for c in ("date", "usable_hours", "good_columns")
+                        if c in t.columns]
+                lines = ["  " + "  ".join(f"{str(r[c]):>12}" for c in cols)
+                         for _, r in t[cols].iterrows()]
+                detail = ("\n\nWhat each day contained "
+                          f"(a day needs at least {MIN_USABLE_HOURS} h and one "
+                          f"usable column):\n"
+                          + "  " + "  ".join(f"{c:>12}" for c in cols) + "\n"
+                          + "\n".join(lines[:10]))
+        except Exception:
+            pass
+        raise ValueError(
+            "No day in that range had enough usable data to train on." + detail)
+    train_days, test_days = split_days(usable_days)
+    gapmask, cad_info = real_gaps(grid, found)
+
+    # Decide, BEFORE anything is filled, which channels actually recorded.
+    #
+    # Two things went wrong when this was decided afterwards on the filled
+    # grid. A channel with thirty-one readings -- one boot-up minute -- passed
+    # a ">0" test and was then reconstructed for two whole days from three live
+    # peers, and a channel with NO readings was reconstructed the same way and
+    # then counted as "reporting" because the count looked at what the model
+    # had just written. The 04-05 Sep output had 645,708 of its 664,047
+    # "reconstructed" cells on twenty-one sensors that are not wired in.
+    #
+    # A channel counts as live only if it recorded at least MIN_USABLE_HOURS
+    # of readings at its own cadence over the period -- the same bar a day has
+    # to clear. Anything under that is left as it was found: an empty column,
+    # flagged empty, excluded from coverage. There is no honest basis for a
+    # value on a sensor that was never there.
+    live_status = {}
+    day_of = np.asarray(grid.index.normalize())
+    all_days = list(pd.unique(day_of))
+    for fam, cols in found.items():
+        for panel, col in cols.items():
+            if col not in gapmask:
+                continue
+            cad = max(1, int(cad_info.get(col, {}).get("cadence", 1)))
+            measured = before[col].notna().values
+            fillable = np.zeros(len(grid), bool)
+            days_live = 0
+            for d in all_days:
+                on_day = (day_of == d)
+                n = int(measured[on_day].sum())
+                if n * cad * interval_s / 3600.0 < MIN_USABLE_HOURS:
+                    continue          # sensor absent that day: nothing to infer from
+                days_live += 1
+                # Only the stretch BETWEEN the first and last reading of the day.
+                # A sensor swapped in at noon leaves the morning with no basis,
+                # and extrapolating backwards from peers invents a morning that
+                # this sensor never saw.
+                pos = np.where(on_day & measured)[0]
+                span = np.zeros(len(grid), bool)
+                span[pos[0]:pos[-1] + 1] = True
+                fillable |= (on_day & span)
+            gapmask[col] = np.asarray(gapmask[col]) & fillable
+            hours = int(measured.sum()) * cad * interval_s / 3600.0
+            live_status[col] = {
+                "family": fam, "measured": int(measured.sum()),
+                "hours_recorded": round(hours, 2),
+                "days_recording": days_live, "days_in_range": len(all_days),
+                "live": days_live > 0,
+            }
+    n_silent = sum(1 for v in live_status.values() if not v["live"])
+    n_days_live = sum(v["days_recording"] for v in live_status.values())
+    print(f"[LIVE] {len(live_status) - n_silent} channel(s) recorded on at least "
+          f"one day ({n_days_live} channel-days); {n_silent} silent throughout. "
+          f"Gaps are only fillable on a channel's own recording days.")
+
+    say(0.30, "Training")
+    saved_iter = globals().get("MAX_ITER")
+    if max_iter:
+        globals()["MAX_ITER"] = max_iter
+    models = {}
+    try:
+        fams = [f for f in MODEL_FAMILIES if f in found]
+        for i, fam in enumerate(fams):
+            say(0.30 + 0.35 * i / max(len(fams), 1), f"Training the {fam} model")
+            long = build_long(grid, found, feats, fam, blocked, train_days)
+            models[fam] = fit_family(long) if long else None
+    finally:
+        if max_iter and saved_iter is not None:
+            globals()["MAX_ITER"] = saved_iter
+
+    say(0.70, "Measuring accuracy on held-out days")
+    acc, decisions = evaluate(grid, found, feats, models, test_days,
+                              interval_s, blocked)
+
+    say(0.85, "Filling gaps")
+    all_filled = {}
+    for fam in MODEL_FAMILIES:
+        if fam not in found:
+            continue
+        mfill, _ = model_fill(grid, found, fam, feats, gapmask,
+                              models.get(fam), blocked)
+        ifill = interp_fill(grid, found, fam, interval_s, max_interp_minutes)
+        grid, filled, tally = combine(grid, found, fam, ifill, mfill, gapmask,
+                                      interval_s, decisions)
+        all_filled.update(filled)
+    grid = constrain_filled(grid, found, feats, all_filled)
+
+    filled_cells = int(sum(int(np.asarray(m).sum()) for m in all_filled.values()))
+    total_gaps = int(sum(int(np.asarray(m).sum()) for m in gapmask.values()))
+
+    # Separate channels that reported something from channels that never did.
+    #
+    # A channel silent for the whole period is not a gap the model can fill --
+    # there is nothing to infer from. Counting those cells in the denominator
+    # made a run that reconstructed almost every real gap report 0.6% coverage,
+    # because 69 of 72 channels had never been connected.
+    live_gaps = silent_gaps = 0
+    live_cols = silent_cols = 0
+    for col, info in live_status.items():
+        if info["live"]:
+            live_cols += 1
+            live_gaps += int(np.asarray(gapmask[col]).sum())
+        else:
+            silent_cols += 1
+    # Every originally-missing cell that is NOT a fillable gap: the sensor was
+    # not recording then, on any channel. Reported separately so coverage is
+    # never quoted against periods that had no instrument attached.
+    silent_gaps = int(sum(
+        int((before[c].isna().values & ~np.asarray(gapmask[c])).sum())
+        for c in live_status))
+
+    say(1.0, "Done")
+    return {
+        "grid": grid, "before": before, "found": found, "filled": all_filled,
+        "gapmask": gapmask, "accuracy": acc, "interval_s": interval_s,
+        "train_days": train_days, "test_days": test_days,
+        "usable_days": usable_days, "dropped_days": dropped_days,
+        "filled_cells": filled_cells, "total_gaps": total_gaps,
+        "coverage": (filled_cells / total_gaps) if total_gaps else 0.0,
+        "live_gaps": live_gaps, "silent_gaps": silent_gaps,
+        "live_status": live_status,
+        "max_interp_minutes": max_interp_minutes,
+        "excluded_cols": excluded_cols,
+        "exclude_sensors": sorted({int(s) for s in exclude_sensors}),
+        "live_cols": live_cols, "silent_cols": silent_cols,
+        # Coverage against gaps that could in principle be filled.
+        "live_coverage": (filled_cells / live_gaps) if live_gaps else 0.0,
+        "load": load_rep, "faults": fault_rep,
+        # Which families actually got a model, so the caller can say when a
+        # result came from interpolation rather than from the model.
+        "models_ok": {f: (m is not None) for f, m in models.items()},
+    }
+
 
 def main():
     t0 = time.time()
