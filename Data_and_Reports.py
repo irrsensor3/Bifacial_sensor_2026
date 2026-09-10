@@ -75,6 +75,48 @@ CONTENT_BOTH = "Both"
 
 
 # ---------------------------------------------------------------------------
+#  Chart size limits
+# ---------------------------------------------------------------------------
+# Matplotlib cannot show more points than the figure has pixels, but it will
+# happily try. With 72 columns selected on a 7,590-row file that is 546,000
+# points, each one first copied into a Python list -- minutes of work for a
+# picture that is a few hundred pixels wide.
+#
+# Worse, an unparsed time column is a column of strings, which matplotlib
+# treats as CATEGORIES: one tick position per distinct value, so 7,590 of them,
+# laid out and measured. That, not the line count, is what makes the page look
+# frozen. _axis_time below converts to real datetimes so the axis becomes
+# numeric, and _thin caps the rows.
+CHART_MAX_POINTS = 3_000
+
+# Past this many lines the chart is unreadable anyway, and it is nearly always
+# an accident -- "Select all" on a 48-column file, or Irr_* and IrrAvg_* both
+# matching the same guess.
+CHART_WARN_SERIES = 16
+
+
+def _axis_time(frame):
+    """The x values for a chart: real datetimes where possible.
+
+    Falls back to the raw column, which plots as categories -- correct, just
+    slow -- and finally to the index.
+    """
+    col = _find_time_column(frame)
+    if col is None:
+        return frame.index
+    parsed = pd.to_datetime(frame[col], errors="coerce")
+    return parsed if parsed.notna().mean() >= 0.5 else frame[col]
+
+
+def _thin(frame):
+    """Every Nth row, so a chart carries at most CHART_MAX_POINTS."""
+    if frame is None or len(frame) <= CHART_MAX_POINTS:
+        return frame, 1
+    step = len(frame) // CHART_MAX_POINTS + 1
+    return frame.iloc[::step], step
+
+
+# ---------------------------------------------------------------------------
 #  Timestamps
 # ---------------------------------------------------------------------------
 
@@ -164,11 +206,11 @@ def _figure_for(part, temps, irrs, temp_ylim, irr_ylim):
     if not cols_t and not cols_i:
         return None
 
-    time = part["Time"] if "Time" in part.columns else part.index
+    thin, _step = _thin(part)
     return plot_weather_signals(
-        time,
-        {c: part[c].tolist() for c in cols_t},
-        {c: part[c].tolist() for c in cols_i},
+        _axis_time(thin),
+        {c: thin[c].tolist() for c in cols_t},
+        {c: thin[c].tolist() for c in cols_i},
         temp_ylim=temp_ylim,
         irr_ylim=irr_ylim,
     )
@@ -581,9 +623,13 @@ def render_data_reports():
         "Select Temperature Columns", numeric_cols,
         key="selected_temps", label_visibility="collapsed")
 
+    # "irr" matched Irr_1..24 AND IrrAvg_1..24, so the page opened with 48
+    # irradiance lines instead of 24. The averages are still in the list to
+    # pick; they are just not preselected alongside the raw channels.
     if "selected_irradiance" not in st.session_state:
         st.session_state.selected_irradiance = [c for c in numeric_cols
-                                                if "irr" in c.lower()]
+                                                if "irr" in c.lower()
+                                                and "avg" not in c.lower()]
     else:
         st.session_state.selected_irradiance = [
             c for c in st.session_state.selected_irradiance if c in numeric_cols]
@@ -637,17 +683,30 @@ def render_data_reports():
         temp_ylim = None if temp_auto else (temp_y_min, temp_y_max)
         irr_ylim = None if irr_auto else (irr_y_min, irr_y_max)
 
+        n_series = len(selected_temps) + len(selected_irradiance)
+        if n_series > CHART_WARN_SERIES:
+            st.warning(
+                f"{n_series} columns selected. The chart will be slow and hard "
+                f"to read — matplotlib draws every line individually. Use "
+                f"“Remove all” and pick the handful you actually want to show."
+            )
+
         # Slice the Series, then convert -- the old version turned every
         # selected column into a full Python list before trimming it, which on
         # a 124,000-row file with 24 columns selected is a lot of work to throw
-        # away.
+        # away. Then thin the rows: a chart a few hundred pixels wide cannot
+        # show 7,590 of them, let alone 7,590 x 72.
         sliced = df.iloc[x_start:x_end + 1]
-        sliced_time = sliced["Time"] if "Time" in sliced.columns else sliced.index
+        thin, step = _thin(sliced)
+        if step > 1:
+            st.caption(f"Charting every {step}th row ({len(thin):,} of "
+                       f"{len(sliced):,}) for speed. Reports do the same; the "
+                       f"tables in them still use every row.")
 
         fig = plot_weather_signals(
-            sliced_time,
-            {c: sliced[c].tolist() for c in selected_temps},
-            {c: sliced[c].tolist() for c in selected_irradiance},
+            _axis_time(thin),
+            {c: thin[c].tolist() for c in selected_temps},
+            {c: thin[c].tolist() for c in selected_irradiance},
             temp_ylim=temp_ylim,
             irr_ylim=irr_ylim,
         )
