@@ -15,6 +15,8 @@ from fpdf import FPDF
 import tempfile
 from supabase import create_client
 
+SUPABASE_ENABLED = False
+
 # Create a Supabase client here so other modules can import it from this package.
 # Missing secrets used to raise a bare KeyError at import time, which Streamlit
 # shows as a stack trace with no indication of what to fix.
@@ -29,8 +31,13 @@ def _require_secret(name: str) -> str:
         st.stop()
 
 
-supabase = create_client(_require_secret("SUPABASE_URL"),
-                         _require_secret("SUPABASE_KEY"))
+if SUPABASE_ENABLED:
+    supabase = create_client(
+        _require_secret("SUPABASE_URL"),
+        _require_secret("SUPABASE_KEY"),
+    )
+else:
+    supabase = None
 
 # =========================
 # AUTHENTICATION
@@ -1636,9 +1643,10 @@ def get_excluded_sensors():
         return []
 
 def _safe_query(table: str, limit: int, label: str):
-    """Run a Supabase read and surface failures as a message rather than a
-    stack trace. Every fetcher used to let an exception escape, so a brief
-    connection blip took the whole page down instead of showing stale data."""
+    """Run a Supabase read unless the UI integration is disabled."""
+    if not SUPABASE_ENABLED:
+        return []
+
     try:
         res = (
             supabase.table(table)
@@ -1650,7 +1658,9 @@ def _safe_query(table: str, limit: int, label: str):
         return res.data or []
     except Exception as exc:
         st.session_state[f"_fetch_error_{table}"] = str(exc)
-        st.warning(f"Couldn't load {label} from the database. Showing nothing for now.")
+        st.warning(
+            f"Couldn't load {label} from the database. Showing nothing for now."
+        )
         return []
 
 # Cached like the other two fetchers. Without the decorator this ran a fresh
