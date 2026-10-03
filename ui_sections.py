@@ -15,7 +15,7 @@ from fpdf import FPDF
 import tempfile
 from supabase import create_client
 
-SUPABASE_ENABLED = False
+SUPABASE_ENABLED = True
 
 # Create a Supabase client here so other modules can import it from this package.
 # Missing secrets used to raise a bare KeyError at import time, which Streamlit
