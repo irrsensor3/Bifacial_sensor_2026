@@ -87,18 +87,27 @@ def send_alert_email(subject: str, body: str) -> bool:
         smtp_password = st.secrets["SMTP_PASSWORD"]
 
         sender = st.secrets.get("ALERT_EMAIL_FROM", smtp_user)
-        recipient = st.secrets.get("ALERT_EMAIL_TO", smtp_user)
+
+        # ALERT_EMAIL_TO can be one address, a comma-separated string,
+        # or a TOML list. Falls back to the sending account.
+        raw_to = st.secrets.get("ALERT_EMAIL_TO", smtp_user)
+        if isinstance(raw_to, str):
+            recipients = [a.strip() for a in raw_to.split(",") if a.strip()]
+        else:
+            recipients = [str(a).strip() for a in raw_to if str(a).strip()]
+        if not recipients:
+            recipients = [smtp_user]
 
         msg = MIMEMultipart()
         msg["From"] = sender
-        msg["To"] = recipient
+        msg["To"] = ", ".join(recipients)
         msg["Subject"] = subject
         msg.attach(MIMEText(body, "plain"))
 
         with smtplib.SMTP(smtp_host, smtp_port, timeout=10) as server:
             server.starttls()
             server.login(smtp_user, smtp_password)
-            server.sendmail(sender, [recipient], msg.as_string())
+            server.sendmail(sender, recipients, msg.as_string())
 
         return True
 
