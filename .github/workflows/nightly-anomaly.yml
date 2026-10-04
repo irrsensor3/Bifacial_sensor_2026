@@ -1,0 +1,33 @@
+# Save as .github/workflows/nightly-anomaly.yml in the app's GitHub repo.
+name: Nightly anomaly check
+
+on:
+  schedule:
+    - cron: "0 16 * * *"     # 16:00 UTC = 00:00 Malaysia time (UTC+8)
+  workflow_dispatch:          # adds a "Run workflow" button for testing
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run detection
+        run: python nightly_check.py
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          ALERT_EMAIL_FROM: ${{ secrets.ALERT_EMAIL_FROM }}
+          ALERT_EMAIL_TO: ${{ secrets.ALERT_EMAIL_TO }}
+          DAYS: "3"
