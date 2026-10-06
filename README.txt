@@ -1,337 +1,261 @@
-# Bifacial_sensor_2026
+Bifacial Sensor 2026
 
-A Streamlit application for working with bifacial sensor data (IRR sensors). The app provides data ingestion from Supabase, live monitoring, data visualization, reporting (DOCX & PDF), and admin controls for device/sensor settings.
+Bifacial sensor monitoring and analysis system for rooftop photovoltaic research and field monitoring. The project combines a Raspberry Pi data logger, cloud storage, and a Streamlit dashboard to collect irradiance data, monitor panel performance, identify anomalies, and generate reports.
 
----
+Overview
 
-Table of contents
-- [Project overview](#project-overview)
-- [Features](#features)
-- [Repository layout](#repository-layout)
-- [Requirements](#requirements)
-- [Quick start](#quick-start)
-- [Configuration (Supabase & secrets)](#configuration-supabase--secrets)
-- [Recommended Supabase schema (example SQL)](#recommended-supabase-schema-example-sql)
-- [Running locally](#running-locally)
-- [Docker (optional)](#docker-optional)
-- [Deployment](#deployment)
-- [App usage and pages](#app-usage-and-pages)
-- [Security notes](#security-notes)
-- [Debugging & troubleshooting](#debugging--troubleshooting)
-- [Development notes & suggestions](#development-notes--suggestions)
-- [Contributing](#contributing)
-- [License](#license)
-- [Contact](#contact)
+This repository contains the core software used to:
+- read bifacial irradiance sensors from multiple I2C buses on a Raspberry Pi
+- log data locally to CSV files and push readings to Supabase
+- display live monitoring, panel performance, and irradiance trends in a browser dashboard
+- detect abnormal readings and data quality issues
+- generate data summaries and export reports in DOCX and PDF formats
 
----
+The system is designed for a practical field deployment where sensor hardware may be partially connected, readings may be noisy, and the dashboard must continue operating without failing if a single channel or upstream service is temporarily unavailable.
 
-## Project overview
+Project scope
 
-This repo contains a Streamlit-based tool to visualize, monitor, and report bifacial sensor data (irradiance and related signals). It integrates with Supabase for storing readings, panel metrics, alerts, and configuration. Users can preview and export reports (DOCX / PDF) and view live time-series. There is a simple authentication UI with "Admin" and "Guest" roles.
+The repository includes both the field-side data acquisition layer and the analysis/visualisation layer:
+- bifacial_logger.py: sensor logger for Raspberry Pi hardware
+- app.py: main Streamlit dashboard entry point
+- ui_sections.py: shared UI components, theming, data fetching, and plotting helpers
+- Live_Monitoring.py: real-time monitoring views
+- Panel_Array.py: panel-level output views
+- Irradiance_Tracker.py: irradiance performance and timeline analytics
+- Data_and_Reports.py: data inspection and report generation
+- Anomalies.py: anomaly detection and fault review
+- Admin_Controls.py: admin settings and operational controls
+- detector.py, Gap_Filling.py, pv_gapfill.py: data-quality and gap-filling routines
+- drive_fetch.py: Google Drive data access utilities
+- nightly_check.py: scheduled validation / maintenance logic
 
-Key files
-- `app.py` — Streamlit entrypoint and navigation.
-- `ui_sections.py` — theme, auth helpers, plotting & report-generation utilities, Supabase client and fetchers.
-- `Data_and_Reports.py` — (data processing & report UI; present in repo)
-- `Live_Monitoring.py` — (live monitoring UI; present in repo)
-- `Admin_Controls.py` — (admin UI; present in repo)
-- `Irradiance_Tracker.py` — (irradiance-specific pages; present in repo)
-- `requirements.txt` — Python dependencies.
-- `README.txt` — short project notes (this file expands that into a full README).
+Hardware and data flow
 
----
+The logger reads 24 irradiance/temperature channels distributed across three I2C buses on the Raspberry Pi. Each bus uses ADS1115 boards with multiple analog input channels. The logger samples irradiance on a short interval and records temperature once per minute, along with running averages for each sensor.
 
-## Features
+Data is then written to local CSV files and optionally pushed to Supabase. The dashboard reads the cloud data to display the current state of the array, detect issues, and allow report generation.
 
-- Authentication with Admin / Guest flows.
-- Custom "Field Notebook" theme (CSS injected on startup).
-- Live sensor readings pulled from Supabase (cached at short TTL).
-- Panel readings and alert fetching.
-- Plotting utilities using matplotlib.
-- Report generation:
-  - DOCX via python-docx
-  - PDF via fpdf2 (images embedded from matplotlib)
-- Admin toggles for forcing sensors to log even below sub-zero cutoffs (stored in Supabase settings).
-- Exportable metadata and numeric summaries.
+System architecture
 
----
+1. Raspberry Pi field node
+   - reads sensors through three I2C buses
+   - validates readings for obvious faults
+   - writes per-day CSV files
+   - optionally pushes data to Supabase
 
-## Repository layout
+2. Supabase backend
+   - stores sensor readings, alerts, admin settings, and control data
+   - serves as the live source for the dashboard
 
-(approximate — adjust if files moved)
+3. Streamlit web app
+   - live monitoring
+   - panel performance visualisation
+   - anomaly review
+   - reporting and export
+   - admin controls
 
-- app.py
-- ui_sections.py
-- Data_and_Reports.py
-- Live_Monitoring.py
-- Admin_Controls.py
-- Irradiance_Tracker.py
-- requirements.txt
-- README.md (this file)
-- data/ (optional local data)
-- .streamlit/ (optional streamlit config)
+Repository layout
 
----
+app.py
+Main Streamlit application entry point and navigation hub.
 
-## Requirements
+ui_sections.py
+Shared dashboard styling, login flow, helper functions, plots, and data fetch logic.
 
-Install dependencies using:
+Live_Monitoring.py
+Live sensor views and monitoring summary screens.
 
-```bash
-python -m venv .venv
-source .venv/bin/activate    # macOS / Linux
-# .venv\Scripts\activate     # Windows (PowerShell)
-pip install -r requirements.txt
-```
+Panel_Array.py
+Panel-level visualisation and array output views.
 
-Core Python libraries used:
+Irradiance_Tracker.py
+Irradiance trends, direct beam comparisons, and tracker views.
+
+Data_and_Reports.py
+Report generation and dataset review screens.
+
+Anomalies.py
+Anomaly identification and analysis pages.
+
+Admin_Controls.py
+Administrative controls and operational toggles.
+
+bifacial_logger.py
+Field logger that reads sensors, stores data, and handles Supabase sync.
+
+detector.py
+Additional detection logic for signal quality and data validation.
+
+Gap_Filling.py
+Gap-filling and imputation routines for incomplete sensor data.
+
+pv_gapfill.py
+PV-specific gap-filling logic used in data quality workflows.
+
+drive_fetch.py
+Google Drive integration utilities for retrieving external files.
+
+nightly_check.py
+Nightly maintenance or validation script for operational checks.
+
+requirements.txt
+Python dependency list for the project.
+
+README.txt
+Project documentation.
+
+Requirements
+
+Python 3.10 or newer recommended
+
+Core Python packages:
 - streamlit
 - pandas
+- numpy
 - matplotlib
+- plotly
+- scikit-learn
 - python-docx
 - fpdf2
-- supabase (supabase-py)
-- streamlit-autorefresh (if present)
-- other standard libraries: tempfile, io, datetime, hashlib, os
+- supabase
+- google-api-python-client
+- google-auth
 
----
+Install dependencies:
 
-## Quick start
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
 
-1. Create and activate a virtual environment (see above).
-2. Add required secrets (see next section).
-3. Run the app:
-```bash
+On Windows PowerShell:
+
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+
+Quick start
+
+1. Create and activate a Python environment.
+2. Install the requirements.
+3. Configure the required Supabase credentials.
+4. Start the dashboard:
+
 streamlit run app.py
-```
-Open the displayed URL (by default http://localhost:8501).
 
----
+The app will start on the default Streamlit port, typically:
 
-## Configuration (Supabase & secrets)
+http://localhost:8501
 
-The app references Supabase via `st.secrets["SUPABASE_URL"]` and `st.secrets["SUPABASE_KEY"]` in `ui_sections.py`. Provide these either through Streamlit secrets or environment variables depending on how you run Streamlit.
+Environment and configuration
 
-Streamlit secrets file: `.streamlit/secrets.toml` example:
+The dashboard expects configuration values for this project, especially the Supabase connection details. These should not be committed directly to the repository.
 
-```toml
+Typical setup options:
+- Streamlit secrets file: .streamlit/secrets.toml
+- environment variables loaded during startup
+- secure host-specific configuration in a deployment environment
+
+Example secrets file:
+
 SUPABASE_URL = "https://your-project.supabase.co"
 SUPABASE_KEY = "your-supabase-key"
-# Optionally any other secrets such as admin password (if desired)
-```
 
-Security recommendations:
-- DO NOT commit keys to source control.
-- Use the Supabase anon key (for client operations) with Row Level Security enabled, or create a secure server-side proxy for privileged operations.
-- Never expose the Supabase `service_role` key in a browser-accessible app. If the app uses privileged operations, run those server-side only.
+Security notes:
+- keep credentials out of source control
+- avoid exposing service-role keys in client-facing code
+- use role-based access and restrict database permissions where possible
+- verify local and remote config before production deployment
 
----
+Running the field logger
 
-## Recommended Supabase schema (example SQL)
+The logger script is intended for a Raspberry Pi connected to the configured sensor hardware.
 
-Below are suggested table structures based on how `ui_sections.py` accesses Supabase. Adjust types and constraints to match your ingestion pipeline.
+Example:
 
-1) sensor_readings
-```sql
-CREATE TABLE public.sensor_readings (
-  id bigint GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
-  created_at timestamptz DEFAULT now(),
-  date text,           -- optional date string used in reports
-  time text,           -- optional time string used in reports
-  readings jsonb       -- JSON object with keys like "sensor_1": 123, "sensor_2": 456, ...
-);
-```
+python bifacial_logger.py
 
-2) panel_readings
-```sql
-CREATE TABLE public.panel_readings (
-  id bigint GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
-  created_at timestamptz DEFAULT now(),
-  panel_id text,
-  measurements jsonb   -- e.g. {"voc": ..., "isc": ..., "power": ...}
-);
-```
+The logger will:
+- open the configured I2C buses
+- read the sensor channels
+- validate readings
+- write CSV output to the local data directory
+- optionally push readings to Supabase
 
-3) sensor_alerts
-```sql
-CREATE TABLE public.sensor_alerts (
-  id bigint GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
-  created_at timestamptz DEFAULT now(),
-  sensor_id text,
-  level text,          -- e.g. "warning", "critical"
-  message text,
-  metadata jsonb
-);
-```
+The hardware configuration is defined in the script and expects the Raspberry Pi I2C overlays to be enabled and the ADS1115 boards to be present on the expected addresses.
 
-4) pi_settings
-```sql
-CREATE TABLE public.pi_settings (
-  id integer PRIMARY KEY,
-  force_log_sensors jsonb DEFAULT '[]'::jsonb  -- array of sensor IDs to force logging
-);
--- Insert default settings row:
-INSERT INTO public.pi_settings (id, force_log_sensors) VALUES (1, '[]');
-```
+Data storage
 
-Notes:
-- The app expects `pi_settings` to have a row with `id = 1`.
-- `sensor_readings.readings` is expanded into dataframe columns in the app (so key names become columns).
+The logger stores data in a local directory structure based on year and month, with per-day CSV files. A typical layout is:
 
----
+~/Desktop/bifacial data/
+  2026/
+    10/
+      Bifacial_2026-10-06.csv
 
-## Running locally
+Each row contains date, time, irradiance values, temperature values, and rolling irradiance averages for each configured sensor.
 
-1. Ensure `.streamlit/secrets.toml` contains the Supabase values (or set env vars and load them into st.secrets).
-2. Install dependencies (see Requirements).
-3. Start Streamlit:
-```bash
-streamlit run app.py
-```
-4. Use the login page to access the app:
-- Admin: App currently validates a password using a salted hash in `ui_sections.py`. Change this before production.
-- Guest: No password required.
+Dashboard features
 
----
+The Streamlit application provides a practical operational dashboard for the field installation:
+- live monitoring of current irradiance readings
+- panel-by-panel output review
+- front and rear irradiance comparison
+- anomaly detection and flagged issues
+- data reports for review and export
+- admin controls for system operation and sensor configuration
 
-## Docker (optional)
+Admin access
 
-Example Dockerfile for running the app in a container:
+The application includes a login flow and admin role handling. In a production deployment, the authentication method should be reviewed and hardened against a simple local credential model.
 
-```dockerfile
-FROM python:3.11-slim
+Recommended operational practice:
+- keep admin credentials outside code
+- restrict administrative access to trusted users
+- review any force-log or override behaviour before use in production
 
-WORKDIR /app
+Reports and exports
 
-# Install dependencies
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+The repo includes report generation utilities for professional export outputs:
+- DOCX report generation
+- PDF report generation
+- embedded plots and summary visuals
 
-# Copy application
-COPY . .
+This is useful for site reporting, daily review, and project documentation.
 
-# Use a non-root user (optional)
-ENV PYTHONUNBUFFERED=1
+Deployment notes
 
-# Ensure fonts backend for matplotlib when running headless
-ENV MPLBACKEND=Agg
+The application can be run locally or deployed to a server environment.
 
-EXPOSE 8501
-CMD ["streamlit", "run", "app.py", "--server.port=8501", "--server.address=0.0.0.0"]
-```
+Typical deployment approaches:
+- local workstation for development and test
+- Raspberry Pi + local dashboard access in the field
+- remote server running the Streamlit dashboard with cloud database connectivity
+- container-based deployment if required
 
-Build and run:
-```bash
-docker build -t bifacial-sensor-app .
-docker run -e SUPABASE_URL="..." -e SUPABASE_KEY="..." -p 8501:8501 bifacial-sensor-app
-```
+For headless environments, ensure the plotting backend is configured correctly for Matplotlib, especially when generating reports or running in Docker.
 
-If you prefer docker-compose, add a service and pass secrets as environment variables or mounted files.
+Troubleshooting
 
----
+Common issues:
+- missing Supabase credentials
+- wrong I2C bus configuration on the Raspberry Pi
+- ADS1115 boards not detected on expected addresses
+- sensors returning negative or unrealistic values
+- missing or stale local data files
+- Matplotlib backend issues in headless environments
 
-## Deployment
+In such cases, check the logs generated by the Python scripts and verify the sensor map, bus configuration, and database connectivity.
 
-- Streamlit Community Cloud: add repo and set secrets in the web UI (recommended for quick sharing).
-- VPS / Docker: run using the Dockerfile above.
-- Use a reverse proxy (nginx) with TLS if exposing publicly.
+Project status
 
----
+This repository is a field monitoring and analysis project for bifacial PV research. It is structured around operational monitoring and reporting rather than a generic template project. The codebase includes both hardware integration code and analytical dashboard tools.
 
-## App usage and pages
+License
 
-The app uses `st.navigation` and provides these pages (see `app.py`):
-- Data & Reports — load datasets, generate previews, export DOCX/PDF.
-- Live Monitoring — shows live readings and time series from Supabase.
-- Irradiance Tracker — specialized irradiance graphs and frequency histograms.
-- Admin Controls — only visible to admin role (toggle sensor force options, settings).
+No explicit license file is present in the repository at this time. If this project is intended for public distribution, add a LICENSE file before publishing or sharing it more widely.
 
-Important behaviors:
-- `ui_sections.inject_theme()` injects CSS to style the entire app.
-- Authentication is stored in `st.session_state` as `auth` and `user_role`.
-- When not authenticated, the app stops at the login screen (Streamlit `st.stop()`), preventing access to navigation.
-- The admin password uses a salted hash in `ui_sections.py` — change this to a secure user management system for production.
+Contact
 
----
+Repository owner: irrsensor3
 
-## Report generation
-
-- Word (DOCX) via python-docx — `generate_word_report()` returns an in-memory BytesIO buffer.
-- PDF via fpdf2 — `generate_pdf_report()` returns bytes.
-
-Both functions use `build_report_data()` to create a consistent metadata and numeric summary. Matplotlib figures are converted to PNG and embedded into the documents.
-
-Be aware:
-- Large figures can increase PDF size.
-- For headless servers or Docker, ensure Matplotlib backend `Agg` is used (ENV MPLBACKEND=Agg or set in code).
-
----
-
-## Security notes
-
-- Change the default admin password and SALT in `ui_sections.py` before any public deployment. Better: replace with OAuth or an external auth provider.
-- Do not store or publish Supabase `service_role` keys in client-side apps. Use RLS (Row Level Security) and the anon key when appropriate, or route privileged operations through a backend.
-- Sanitize and validate any user-provided inputs that may be written to your database.
-
----
-
-## Debugging & troubleshooting
-
-Common issues and fixes:
-- "KeyError: SUPABASE_URL" or missing key: ensure `.streamlit/secrets.toml` is present and Streamlit is loading it, or set environment variables and map them into st.secrets when running (Streamlit uses secrets automatically when a secrets.toml exists in `.streamlit`).
-- Matplotlib errors in Docker: set MPLBACKEND=Agg or use `matplotlib.use("Agg")` before importing pyplot.
-- Fonts not loading (Google fonts blocked): fallback styling still works; app will use system fonts.
-- Large JSON loading slowness: increase Supabase query limits and implement pagination/filters in the UI; consider pre-aggregating data server-side.
-- PDF generation issues on servers: ensure temporary files can be created and deleted; the code uses tempfile and then removes the file.
-
-If Supabase fetches return empty DataFrames, verify:
-- Tables exist and have rows.
-- The keys/column names match expectations (`created_at`, `readings`).
-- The Supabase user has permissions to SELECT.
-
----
-
-## Development notes & suggestions (recommended improvements)
-
-- Replace the simple password check with a proper authentication flow:
-  - Streamlit + OAuth (GitHub, Google) or
-  - Server-side auth + role-based access with session tokens.
-- Avoid in-file SALT & hard-coded password. Move admin credentials to secrets or external auth.
-- Provide a configuration module or .env parsing for non-Supabase settings.
-- Add unit/integration tests for data processing functions (e.g. report builders, plot functions).
-- Add a CI pipeline (GitHub Actions) to run linting and tests.
-- Add more robust error reporting/metrics (Sentry or similar).
-- Improve error handling around Supabase calls and surface actionable messages in the UI.
-- Escape or validate long column lists used in PDF rendering to avoid layout overflow.
-
----
-
-## Contributing
-
-1. Fork the repository.
-2. Create a feature branch: `git checkout -b feat/your-feature`.
-3. Make changes and commit with clear messages.
-4. Push to your fork and open a pull request describing the changes.
-
-Please open issues for bug reports or feature requests.
-
----
-
-## License
-
-Add a LICENSE file to indicate desired license (MIT or Apache-2.0 recommended for most projects). Example:
-```text
-MIT License
-```
-
----
-
-## Contact
-
-Repository owner: `irrsensor3` (GitHub user)
-
-If you'd like, I can:
-- convert this README into the repository file,
-- create starter `.streamlit/secrets.toml.example`,
-- create a Docker Compose example or CI workflow,
-- or draft the SQL migration files for the Supabase schema above.
+This project is intended for the operation, monitoring, and analysis of the bifacial sensor installation described in the repository.
