@@ -1,114 +1,147 @@
 Bifacial Sensor 2026
 
-Bifacial sensor monitoring and analysis system for rooftop photovoltaic research and field monitoring. The project combines a Raspberry Pi data logger, cloud storage, and a Streamlit dashboard to collect irradiance data, monitor panel performance, identify anomalies, and generate reports.
+Operational monitoring platform for bifacial photovoltaic performance and field sensor data.
 
 Overview
 
-This repository contains the core software used to:
-- read bifacial irradiance sensors from multiple I2C buses on a Raspberry Pi
-- log data locally to CSV files and push readings to Supabase
-- display live monitoring, panel performance, and irradiance trends in a browser dashboard
-- detect abnormal readings and data quality issues
-- generate data summaries and export reports in DOCX and PDF formats
+Bifacial Sensor 2026 is a field monitoring system designed to collect, validate, monitor, and report bifacial irradiance and panel performance data from a rooftop PV installation. The platform combines a Raspberry Pi-based sensor logger, cloud data storage, and a Streamlit operations dashboard to provide live visibility into system performance and data quality.
 
-The system is designed for a practical field deployment where sensor hardware may be partially connected, readings may be noisy, and the dashboard must continue operating without failing if a single channel or upstream service is temporarily unavailable.
+The system is built for day-to-day operational use. It is intended to help operators answer practical questions such as:
+- Are the sensors reporting normally?
+- Are panel outputs consistent with expected irradiance?
+- Is a sensor channel failing or disconnected?
+- Are there abnormal conditions requiring investigation?
+- Can reports be generated quickly from current and historical data?
 
-Project scope
+Product scope
 
-The repository includes both the field-side data acquisition layer and the analysis/visualisation layer:
-- bifacial_logger.py: sensor logger for Raspberry Pi hardware
-- app.py: main Streamlit dashboard entry point
-- ui_sections.py: shared UI components, theming, data fetching, and plotting helpers
-- Live_Monitoring.py: real-time monitoring views
-- Panel_Array.py: panel-level output views
-- Irradiance_Tracker.py: irradiance performance and timeline analytics
-- Data_and_Reports.py: data inspection and report generation
-- Anomalies.py: anomaly detection and fault review
-- Admin_Controls.py: admin settings and operational controls
-- detector.py, Gap_Filling.py, pv_gapfill.py: data-quality and gap-filling routines
-- drive_fetch.py: Google Drive data access utilities
-- nightly_check.py: scheduled validation / maintenance logic
-
-Hardware and data flow
-
-The logger reads 24 irradiance/temperature channels distributed across three I2C buses on the Raspberry Pi. Each bus uses ADS1115 boards with multiple analog input channels. The logger samples irradiance on a short interval and records temperature once per minute, along with running averages for each sensor.
-
-Data is then written to local CSV files and optionally pushed to Supabase. The dashboard reads the cloud data to display the current state of the array, detect issues, and allow report generation.
+This repository contains the complete monitoring and analysis stack for the project:
+- Raspberry Pi logger for sensor acquisition and local data capture
+- data validation and anomaly handling
+- cloud synchronization through Supabase
+- operational dashboard for live monitoring
+- panel and irradiance analytics
+- reporting and export tools
+- admin and system control functions
 
 System architecture
 
-1. Raspberry Pi field node
-   - reads sensors through three I2C buses
-   - validates readings for obvious faults
-   - writes per-day CSV files
-   - optionally pushes data to Supabase
+The system follows a simple operational workflow:
 
-2. Supabase backend
-   - stores sensor readings, alerts, admin settings, and control data
-   - serves as the live source for the dashboard
+1. Sensor acquisition
+   The Raspberry Pi reads irradiance and temperature data from multiple sensor channels distributed across several I2C buses.
 
-3. Streamlit web app
-   - live monitoring
-   - panel performance visualisation
-   - anomaly review
-   - reporting and export
-   - admin controls
+2. Local data persistence
+   Readings are written to local CSV files for durable storage and historical recovery.
 
-Repository layout
+3. Cloud synchronization
+   Valid data is pushed to Supabase, providing a central live source for the dashboard and downstream analysis.
+
+4. Operational dashboard
+   The Streamlit application surfaces live readings, trends, panel output, anomalies, and reporting views.
+
+5. Operational response
+   Admin tools and alert logic support maintenance actions, manual overrides, and system health checks.
+
+Repository structure
 
 app.py
-Main Streamlit application entry point and navigation hub.
+Main Streamlit application entry point and navigation layer.
 
 ui_sections.py
-Shared dashboard styling, login flow, helper functions, plots, and data fetch logic.
+Shared dashboard styling, authentication, helper utilities, fetching logic, charts, and report support.
 
 Live_Monitoring.py
-Live sensor views and monitoring summary screens.
+Live monitoring views and current operating status.
 
 Panel_Array.py
-Panel-level visualisation and array output views.
+Panel-level output and array-level performance views.
 
 Irradiance_Tracker.py
-Irradiance trends, direct beam comparisons, and tracker views.
+Irradiance trend analysis and tracking views.
 
 Data_and_Reports.py
-Report generation and dataset review screens.
+Dataset review and report generation functionality.
 
 Anomalies.py
-Anomaly identification and analysis pages.
+Anomaly detection and issue review workflow.
 
 Admin_Controls.py
-Administrative controls and operational toggles.
+Admin settings and system controls.
 
 bifacial_logger.py
-Field logger that reads sensors, stores data, and handles Supabase sync.
+Field logger responsible for hardware sampling, local CSV logging, and Supabase synchronization.
 
 detector.py
-Additional detection logic for signal quality and data validation.
+Detection and validation logic for signal quality and abnormal conditions.
 
 Gap_Filling.py
-Gap-filling and imputation routines for incomplete sensor data.
+Gap-filling logic for incomplete or interrupted readings.
 
 pv_gapfill.py
-PV-specific gap-filling logic used in data quality workflows.
+PV-specific data quality and filling routines.
 
 drive_fetch.py
-Google Drive integration utilities for retrieving external files.
+Google Drive integration utilities for retrieving external files or support data.
 
 nightly_check.py
-Nightly maintenance or validation script for operational checks.
+Scheduled operational checks or maintenance routines.
 
 requirements.txt
-Python dependency list for the project.
+Python dependencies for the project.
 
 README.txt
-Project documentation.
+Repository documentation and operations reference.
+
+What the platform does
+
+Live monitoring
+- view current irradiance conditions
+- monitor panel output in near real time
+- track front and rear irradiance differences
+- review array status across multiple panels
+
+Data quality management
+- detect missing or invalid sensor channels
+- treat grounded or disconnected channels safely
+- log anomalies and alerts
+- support data gap handling and repair workflows
+
+Reporting
+- generate operational summaries
+- produce DOCX and PDF exports
+- package reports with charts and summary metrics
+
+Administration
+- control access through a login flow
+- support admin-only operational controls
+- enable sensor configuration and override actions where required
+
+Operations and deployment model
+
+This project is designed for real field operations rather than a generic demo application. It supports a practical workflow in which:
+- sensor hardware sits on-site and logs continuously
+- the Pi stores raw data locally for resilience
+- the dashboard provides live situational awareness to operators
+- reporting can be generated with minimal delay
+- cloud-backed data access reduces dependence on direct local access
+
+Typical operational setup
+
+- Raspberry Pi field node connected to the sensor array
+- multiple I2C buses and ADS1115 boards handling sensor acquisition
+- local CSV data storage on the Pi
+- Supabase used as the central data and control layer for the dashboard
+- Streamlit dashboard served for operational review and reporting
 
 Requirements
 
-Python 3.10 or newer recommended
+Recommended runtime:
+- Python 3.10+
+- Linux or Raspberry Pi OS for the logger
+- Windows, Linux, or macOS for local dashboard development
 
-Core Python packages:
+Core dependencies:
 - streamlit
 - pandas
 - numpy
@@ -135,127 +168,126 @@ pip install -r requirements.txt
 
 Quick start
 
-1. Create and activate a Python environment.
-2. Install the requirements.
-3. Configure the required Supabase credentials.
-4. Start the dashboard:
+Run the web application:
 
 streamlit run app.py
 
-The app will start on the default Streamlit port, typically:
+Start the field logger on the Raspberry Pi:
+
+python bifacial_logger.py
+
+The dashboard is typically served on:
 
 http://localhost:8501
 
-Environment and configuration
+Configuration
 
-The dashboard expects configuration values for this project, especially the Supabase connection details. These should not be committed directly to the repository.
+The project depends on external configuration for sensor access and cloud connectivity. Store credentials securely and do not commit them to the repository.
 
-Typical setup options:
-- Streamlit secrets file: .streamlit/secrets.toml
-- environment variables loaded during startup
-- secure host-specific configuration in a deployment environment
+Recommended configuration sources:
+- Streamlit secrets file
+- environment variables
+- deployment platform secret storage
 
-Example secrets file:
+Example `.streamlit/secrets.toml`:
 
 SUPABASE_URL = "https://your-project.supabase.co"
 SUPABASE_KEY = "your-supabase-key"
 
-Security notes:
-- keep credentials out of source control
-- avoid exposing service-role keys in client-facing code
-- use role-based access and restrict database permissions where possible
-- verify local and remote config before production deployment
+Security guidance:
+- keep production secrets out of source control
+- avoid exposing service-role credentials in client-facing code
+- use restricted database permissions and role-based access where possible
+- validate access before deploying to a public or shared environment
 
-Running the field logger
+Operational notes
 
-The logger script is intended for a Raspberry Pi connected to the configured sensor hardware.
+The logger is designed to handle real-world field conditions where sensors may be missing, partially connected, or temporarily unstable. The system is deliberately resilient in these cases:
+- invalid readings are not allowed to crash the logger
+- missing boards are retried without blocking the main workflow
+- disconnected sensor channels are treated safely and logged appropriately
+- cloud outages do not stop local logging from continuing
 
-Example:
+Data output
 
-python bifacial_logger.py
-
-The logger will:
-- open the configured I2C buses
-- read the sensor channels
-- validate readings
-- write CSV output to the local data directory
-- optionally push readings to Supabase
-
-The hardware configuration is defined in the script and expects the Raspberry Pi I2C overlays to be enabled and the ADS1115 boards to be present on the expected addresses.
-
-Data storage
-
-The logger stores data in a local directory structure based on year and month, with per-day CSV files. A typical layout is:
+The logger writes daily CSV files under a year/month directory structure, for example:
 
 ~/Desktop/bifacial data/
   2026/
     10/
       Bifacial_2026-10-06.csv
 
-Each row contains date, time, irradiance values, temperature values, and rolling irradiance averages for each configured sensor.
+The output includes date, time, irradiance values, temperature values, and per-sensor rolling averages.
 
-Dashboard features
+Operational dashboard features
 
-The Streamlit application provides a practical operational dashboard for the field installation:
-- live monitoring of current irradiance readings
-- panel-by-panel output review
+The dashboard is designed for day-to-day operational review:
+- real-time status of the array and sensors
+- live irradiance and panel power views
+- panel-by-panel output breakdown
 - front and rear irradiance comparison
-- anomaly detection and flagged issues
-- data reports for review and export
-- admin controls for system operation and sensor configuration
+- anomaly detection and flagged conditions
+- export-ready reporting for site review
+- admin controls for operational configuration and maintenance
 
 Admin access
 
-The application includes a login flow and admin role handling. In a production deployment, the authentication method should be reviewed and hardened against a simple local credential model.
-
-Recommended operational practice:
-- keep admin credentials outside code
-- restrict administrative access to trusted users
-- review any force-log or override behaviour before use in production
-
-Reports and exports
-
-The repo includes report generation utilities for professional export outputs:
-- DOCX report generation
-- PDF report generation
-- embedded plots and summary visuals
-
-This is useful for site reporting, daily review, and project documentation.
-
-Deployment notes
-
-The application can be run locally or deployed to a server environment.
-
-Typical deployment approaches:
-- local workstation for development and test
-- Raspberry Pi + local dashboard access in the field
-- remote server running the Streamlit dashboard with cloud database connectivity
-- container-based deployment if required
-
-For headless environments, ensure the plotting backend is configured correctly for Matplotlib, especially when generating reports or running in Docker.
+The repository contains an authentication flow and admin-specific controls. This should be treated as operational access and hardened before production deployment. In a live environment, administrative access should be restricted to approved users and protected by secure credentials.
 
 Troubleshooting
 
-Common issues:
+Common operational issues:
 - missing Supabase credentials
-- wrong I2C bus configuration on the Raspberry Pi
-- ADS1115 boards not detected on expected addresses
-- sensors returning negative or unrealistic values
-- missing or stale local data files
-- Matplotlib backend issues in headless environments
+- unavailable or misconfigured I2C buses
+- ADS1115 boards not detected at expected addresses
+- unrealistic or negative sensor values
+- stale or incomplete local data files
+- Matplotlib backend problems in headless environments
 
-In such cases, check the logs generated by the Python scripts and verify the sensor map, bus configuration, and database connectivity.
+Recommended checks:
+- verify the Pi I2C overlay configuration
+- confirm bus and ADS1115 address mapping
+- check the sensor wiring and channel mapping
+- inspect logger output for warnings and connection failures
+- validate Supabase connectivity and row access
+
+Reporting and document output
+
+The project includes support for generating operational documents and summary reports:
+- DOCX reports
+- PDF exports
+- chart-based summary visuals
+
+This is useful for site reviews, maintenance reporting, and project documentation.
+
+Deployment guidance
+
+This application can be deployed in multiple operational models:
+- local development environment
+- Raspberry Pi field deployment
+- remote server for dashboard access
+- container-based deployment for managed infrastructure
+
+For production use, ensure the hosting environment is configured for reliable access to both the data source and the dashboard.
+
+Security and governance
+
+- keep all credentials outside the repository
+- protect admin access and restrict it to trusted users
+- avoid exposing service-role keys in browser-accessible code
+- review user permissions for Supabase and related services
+- validate operational actions before enabling them in production
 
 Project status
 
-This repository is a field monitoring and analysis project for bifacial PV research. It is structured around operational monitoring and reporting rather than a generic template project. The codebase includes both hardware integration code and analytical dashboard tools.
+This repository is a field monitoring and analytics platform for bifacial photovoltaic performance tracking. It is designed for operational visibility, data integrity, and reporting rather than as a generic reference project.
 
 License
 
-No explicit license file is present in the repository at this time. If this project is intended for public distribution, add a LICENSE file before publishing or sharing it more widely.
+No explicit license file is currently present in the repository. If this project is intended for wider distribution or external use, add an appropriate license before publication.
 
-Contact
+Repository owner
 
-Repository owner: irrsensor3
+irrsensor3
 
-This project is intended for the operation, monitoring, and analysis of the bifacial sensor installation described in the repository.
+This project is intended for the operation, monitoring, and analysis of the bifacial sensor installation described in this repository.
