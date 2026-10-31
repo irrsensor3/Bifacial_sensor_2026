@@ -60,17 +60,84 @@ class DriveListingError(RuntimeError):
     """
 
 
-@st.cache_resource
-def _get_drive_service():
-    """Builds a Drive API client from the service account credentials
-    stored in Streamlit secrets (see [gcp_service_account] in
-    secrets.toml). Cached as a resource so it's only built once per
-    session, not on every rerun."""
+def _build_drive_service():
     creds_dict = dict(st.secrets["gcp_service_account"])
     credentials = service_account.Credentials.from_service_account_info(
         creds_dict, scopes=SCOPES
     )
     return build("drive", "v3", credentials=credentials)
+
+
+@st.cache_resource
+def _shared_drive_service():
+    """Builds a Drive API client from the service account credentials
+    stored in Streamlit secrets (see [gcp_service_account] in
+    secrets.toml). Cached as a resource so it's only built once per
+    session, not on every rerun."""
+    return _build_drive_service()
+
+
+def _get_drive_service():
+    """The Drive client for the calling thread.
+
+    Page code shares one cached client. The folder listings below can be
+    refreshed by Streamlit on a background thread (see _listing_cache), and
+    the HTTP library under the Google client is not safe to use from two
+    threads at once -- so a background refresh builds a private client rather
+    than borrowing the one a page may be downloading through at that moment.
+    """
+    try:
+        from streamlit.runtime.scriptrunner import get_script_run_ctx
+        in_page = get_script_run_ctx(suppress_warning=True) is not None
+    except Exception:
+        in_page = True
+    return _shared_drive_service() if in_page else _build_drive_service()
+
+
+# How long a folder listing is trusted. Walking the Drive tree is one API
+# call per folder, a few seconds in all, and used to sit directly in the path
+# of the Live Monitoring refresh: every five minutes one auto-refresh tick
+# stalled for the whole walk.
+LISTING_TTL_S = 300
+
+
+def _listing_cache(func):
+    """st.cache_data for the folder listings, refreshed in the background
+    where this Streamlit supports it.
+
+    With refresh_mode="background" an expired listing is returned at once and
+    re-walked on a worker thread, so no page waits for Drive once the first
+    listing exists. Older Streamlit versions don't have the option, and get
+    the plain cache with the same TTL.
+    """
+    try:
+        return st.cache_data(ttl=LISTING_TTL_S, refresh_mode="background")(func)
+    except TypeError:
+        return st.cache_data(ttl=LISTING_TTL_S)(func)
+
+
+def refresh_modified_times(file_entries):
+    """The same entries with modifiedTime read fresh from Drive, one small
+    files.get call per file. Lets the 15-minute sync of today's file see a new
+    version without re-walking every folder. Any entry that can't be checked
+    is returned unchanged."""
+    if not file_entries:
+        return file_entries
+    try:
+        service = _get_drive_service()
+    except Exception:
+        return file_entries
+    out = []
+    for entry in file_entries:
+        try:
+            meta = _drive_execute(
+                service.files().get(fileId=entry["id"], fields="id, modifiedTime"))
+            fresh = dict(entry)
+            fresh["modifiedTime"] = meta.get("modifiedTime") or entry.get("modifiedTime")
+            out.append(fresh)
+        except Exception:
+            out.append(entry)
+    return out
 
 
 def service_account_email() -> str:
@@ -401,7 +468,7 @@ def _find_csvs_anywhere(service, root_folder_id):
 # cached result sees no error at all.
 # ============================================================
 
-@st.cache_data(ttl=300)
+@_listing_cache
 def _list_available_csvs_cached():
     """
     Returns only irradiance CSV files located inside a valid
@@ -585,10 +652,19 @@ def resolve_period_files(available_files, start_date, end_date):
 # SAFE DRIVE CSV CACHE
 # ============================================================
 
+# max_entries caps how many files are held IN MEMORY; with persist="disk"
+# every file stays on disk and an evicted one is re-read from there, not from
+# Drive. It was 600: each day is tens of megabytes once unpickled, so a few
+# months of browsing could hold gigabytes against Streamlit Cloud's ~1 GB and
+# get the app killed. Fourteen covers the largest range any page loads at once
+# (seven days) with room to spare.
+RAW_FILES_IN_MEMORY = 14
+
+
 @st.cache_data(
     ttl=None,
     persist="disk",
-    max_entries=600,
+    max_entries=RAW_FILES_IN_MEMORY,
 )
 def _download_single_csv_cached(
     file_id: str,
@@ -657,6 +733,14 @@ def download_and_combine_csvs(file_entries: tuple) -> pd.DataFrame:
 
     return combined
 
+def download_csv_cached(file_entry: dict) -> pd.DataFrame:
+    """One irradiance CSV through the per-file cache (keyed on id +
+    modifiedTime), so opening a file another page already loaded is a cache
+    read rather than a fresh Drive download."""
+    return _download_single_csv_cached(
+        file_entry["id"], file_entry.get("modifiedTime") or "")
+
+
 # =========================
 # DC METER (panel-meter-data) — separate Drive folder, separate CSV
 # schema (long format: one row per device per timestamp), so it gets
@@ -664,7 +748,7 @@ def download_and_combine_csvs(file_entries: tuple) -> pd.DataFrame:
 # ones above.
 # =========================
 
-@st.cache_data(ttl=300)
+@_listing_cache
 def _list_available_dcm_csvs_cached(include_avg=False):
     """
     Returns DCM 3366 CSV files under panel-meter-data.
@@ -826,7 +910,7 @@ def download_dcm_csv_as_df(file_id: str) -> pd.DataFrame:
 @st.cache_data(
     ttl=None,
     persist="disk",
-    max_entries=60,
+    max_entries=RAW_FILES_IN_MEMORY,
 )
 def _download_single_dcm_csv_cached(
     file_id: str,
@@ -836,6 +920,12 @@ def _download_single_dcm_csv_cached(
     Cache individual DC meter CSV files.
     """
     return download_dcm_csv_as_df(file_id)
+
+
+def download_dcm_csv_cached(file_entry: dict) -> pd.DataFrame:
+    """One DC-meter CSV through the per-file cache; see download_csv_cached."""
+    return _download_single_dcm_csv_cached(
+        file_entry["id"], file_entry.get("modifiedTime") or "")
 
 
 def download_and_combine_dcm_csvs(file_entries: tuple) -> pd.DataFrame:
@@ -1040,7 +1130,7 @@ def _build_filled_frame(df_filled: pd.DataFrame, df_flags=None) -> pd.DataFrame:
     return out.dropna(subset=["created_at"]).reset_index(drop=True)
 
 
-@st.cache_data(ttl=300)
+@_listing_cache
 def _list_available_filled_csvs_cached():
     """
     Returns the gap-filled irradiance CSVs in the OUTPUT folder, newest
@@ -1121,7 +1211,7 @@ def list_available_filled_csvs():
 @st.cache_data(
     ttl=None,
     persist="disk",
-    max_entries=300,
+    max_entries=RAW_FILES_IN_MEMORY,
 )
 def _download_single_filled_csv_cached(
     file_id: str,
