@@ -1,3 +1,6 @@
+import threading
+from concurrent.futures import ThreadPoolExecutor
+
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -31,6 +34,161 @@ PAGE_SIZE = 1000
 # mid-analysis. 14 days at the observed rate is around 120,000 rows, so this
 # still covers the full range the page offers.
 MAX_ROWS = 150_000
+
+# The fetch is split into time windows that are read in parallel. Each window
+# is still paged forward by timestamp (see _fetch_window), so nothing can be
+# skipped; the windows just stop the round trips from queueing behind each
+# other. Six at once took a three-day fetch from ~16 s to ~3 s on the test rig
+# without leaning hard on the database.
+FETCH_WORKERS = 6
+WINDOW_HOURS = 6
+
+# How long a fetched history is reused. Pressing Run detection again, or
+# coming back to the page, within this window reuses the rows instead of
+# re-reading tens of thousands of them.
+HISTORY_TTL_S = 300
+
+
+class _FetchError(RuntimeError):
+    """Raised out of the cached fetchers so a failed or partial read is never
+    cached -- Streamlit caches return values, not exceptions. Carries whatever
+    was read, so the page can still show it alongside the error."""
+
+    def __init__(self, message, partial):
+        super().__init__(message)
+        self.partial = partial
+
+
+_thread_clients = threading.local()
+
+
+def _client_for_thread():
+    """A Supabase client for the current worker thread.
+
+    The shared client is fine for the page itself, but handing one HTTP
+    connection pool to six threads at once is asking for trouble, so each
+    worker builds its own from the same secrets. Falls back to the shared
+    client if that is not possible.
+    """
+    client = getattr(_thread_clients, "client", None)
+    if client is None:
+        try:
+            from supabase import create_client
+            url, key = _thread_clients.creds
+            client = create_client(url, key)
+        except Exception:
+            client = supabase
+        _thread_clients.client = client
+    return client
+
+
+def _fetch_window(table, columns, start, end, creds):
+    """Every row with start <= created_at < end (end=None: up to now),
+    oldest first.
+
+    Pages by timestamp, not by offset.
+
+    range(page*1000, ...) counts from the start of the result set, but rows
+    are being inserted while the fetch runs, so every new row shifts the
+    offsets and whole pages get skipped. That returned about 62% of the data,
+    and the rows it missed then looked like gaps in the record -- reporting
+    1,050 minutes missing where the database itself says 151.
+
+    Walking forward from the last timestamp seen cannot skip anything,
+    because the cursor is anchored to the data rather than to a position.
+    """
+    _thread_clients.creds = creds
+    client = _client_for_thread()
+    rows, cursor = [], None
+    for _ in range(2000):
+        q = (client.table(table)
+             .select(columns)
+             .order("created_at", desc=False)
+             .limit(PAGE_SIZE))
+        q = q.gt("created_at", cursor.isoformat()) if cursor is not None \
+            else q.gte("created_at", start.isoformat())
+        if end is not None:
+            q = q.lt("created_at", end.isoformat())
+        batch = q.execute().data or []
+        if not batch:
+            break
+        rows.extend(batch)
+        nxt = pd.to_datetime(max(r.get("created_at") for r in batch),
+                             errors="coerce", utc=True)
+        if pd.isna(nxt):
+            break
+        nxt = nxt.tz_localize(None)
+        # A whole page sharing one timestamp would stall the cursor forever.
+        if cursor is not None and nxt <= cursor:
+            nxt = cursor + pd.Timedelta(milliseconds=1)
+        cursor = nxt
+        if len(batch) < PAGE_SIZE:
+            break
+    return rows
+
+
+def _fetch_recent_rows(table, columns, days, max_rows=MAX_ROWS):
+    """The most recent `days` of a table, newest windows first.
+
+    Returns (rows oldest-first, truncated, error). Windows are submitted
+    newest-first and every submitted window is read to the end, so what comes
+    back is always one unbroken stretch ending now. When the row cap is hit,
+    no older windows are started, and the result is trimmed to the newest
+    max_rows -- so a capped fetch covers the RECENT days. (The old loop walked
+    forward from the start date and stopped at the cap, so a 14-day request
+    analysed roughly the first five days and never reached the present.)
+    """
+    now = pd.Timestamp.utcnow().tz_localize(None)
+    since = now - pd.Timedelta(days=days)
+    try:
+        creds = (st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
+    except Exception:
+        creds = (None, None)
+
+    # Newest first. The newest window is open-ended so rows that land while
+    # the fetch is running are still picked up.
+    windows, end = [], None
+    edge = now.floor(f"{WINDOW_HOURS}h")
+    while True:
+        start = max(edge, since)
+        windows.append((start, end))
+        if start <= since:
+            break
+        end, edge = start, start - pd.Timedelta(hours=WINDOW_HOURS)
+
+    done, total, error, truncated = {}, 0, None, False
+    with ThreadPoolExecutor(max_workers=FETCH_WORKERS) as pool:
+        pending = {}
+        nxt = 0
+        while nxt < len(windows) or pending:
+            while (nxt < len(windows) and len(pending) < FETCH_WORKERS
+                   and total < max_rows and error is None):
+                w = windows[nxt]
+                pending[pool.submit(_fetch_window, table, columns, w[0], w[1],
+                                    creds)] = nxt
+                nxt += 1
+            if not pending:
+                break
+            fut = next(iter(pending))          # oldest submission first
+            idx = pending.pop(fut)
+            try:
+                rows = fut.result()
+            except Exception as exc:
+                error = f"Couldn't read {table}: {exc}"
+                continue
+            done[idx] = rows
+            total += len(rows)
+        if nxt < len(windows) and error is None:
+            truncated = True
+
+    # Stitch the windows back together oldest-first.
+    ordered = []
+    for idx in sorted(done, reverse=True):
+        ordered.extend(done[idx])
+    if len(ordered) > max_rows:
+        ordered = ordered[-max_rows:]
+        truncated = True
+    return ordered, truncated, error
 
 SEVERITY_STYLE = {
     "high": ("🔴", "High"),
@@ -119,68 +277,55 @@ def send_alert_email(subject: str, body: str) -> bool:
         return False
 
 def fetch_panel_history(days: int):
+    """Recent panel_readings in the wide layout the detector expects.
+
+    Returns (frame, error_message). Cached for HISTORY_TTL_S; a failed or
+    partial read is returned with its error but never cached.
+    """
+    try:
+        return _panel_history_cached(int(days)), None
+    except _FetchError as exc:
+        return exc.partial, str(exc)
+
+
+@st.cache_data(ttl=HISTORY_TTL_S, show_spinner=False, max_entries=6)
+def _panel_history_cached(days: int):
     """Pull recent panel_readings and reshape to the wide layout the detector
     expects.
 
     Works backwards from now rather than forwards from a start date, so the
     most useful rows arrive first and a truncated fetch still covers the recent
     period rather than an arbitrary slice of the past.
+
+    This was the one history fetch on the page WITHOUT a cache, so every press
+    of Run detection re-read ~29 pages of 1,000 rows per day, one after
+    another. It is now cached, and read in parallel windows.
+
+    A cached function must not write to the screen: on a cache hit Streamlit
+    replays whatever the function displayed, and any reference to a screen
+    element from the earlier run is gone by then, which raises
+    CacheReplayClosureError. Errors are therefore raised (uncached) for the
+    caller to display.
     """
-    # Returns (frame, error_message). A cached function must not write to the
-    # screen: on a cache hit Streamlit replays whatever the function displayed,
-    # and any reference to a screen element from the earlier run is gone by
-    # then, which raises CacheReplayClosureError. Errors are therefore returned
-    # for the caller to display.
-    since = pd.Timestamp.utcnow().tz_localize(None) - pd.Timedelta(days=days)
-    rows, cursor, guard, err = [], None, 0, None
-
-    # Page by timestamp, not by offset.
-    #
-    # range(page*1000, ...) counts from the start of the result set, but rows
-    # are being inserted while the fetch runs, so every new row shifts the
-    # offsets and whole pages get skipped. That returned about 62% of the data,
-    # and the rows it missed then looked like gaps in the record -- reporting
-    # 1,050 minutes missing where the database itself says 151.
-    #
-    # Walking forward from the last timestamp seen cannot skip anything,
-    # because the cursor is anchored to the data rather than to a position.
-    while len(rows) < MAX_ROWS and guard < 2000:
-        guard += 1
-        q = (supabase.table("panel_readings")
-             .select("created_at,device_id,voltage_v,current_a,"
-                     "active_power_kw,forward_energy_kwh")
-             .order("created_at", desc=False)
-             .limit(PAGE_SIZE))
-        q = q.gt("created_at", cursor.isoformat()) if cursor is not None \
-            else q.gte("created_at", since.isoformat())
-        try:
-            batch = q.execute().data or []
-        except Exception as exc:
-            err = f"Couldn't read panel_readings: {exc}"
-            break
-        if not batch:
-            break
-        rows.extend(batch)
-
-        newest = max(r.get("created_at") for r in batch)
-        nxt = pd.to_datetime(newest, errors="coerce", utc=True)
-        if pd.isna(nxt):
-            break
-        nxt = nxt.tz_localize(None)
-        # A whole page sharing one timestamp would stall the cursor forever.
-        if cursor is not None and nxt <= cursor:
-            nxt = cursor + pd.Timedelta(milliseconds=1)
-        cursor = nxt
-        if len(batch) < PAGE_SIZE:
-            break
-
-    if not rows:
-        return pd.DataFrame(), err
-
+    rows, truncated, err = _fetch_recent_rows(
+        "panel_readings",
+        "created_at,device_id,voltage_v,current_a,active_power_kw,forward_energy_kwh",
+        days)
+    out = _panel_rows_to_wide(rows)
     # Report what was actually retrieved. A short fetch looks exactly like a
     # logger outage once the rows are gridded -- missing rows become missing
     # minutes -- so the two have to be told apart before any finding about
-    # "missing samples" can be trusted.
+    # "missing samples" can be trusted. The page reads these back.
+    out.attrs["rows_fetched"] = len(rows)
+    out.attrs["truncated"] = bool(truncated)
+    if err:
+        raise _FetchError(err, out)
+    return out
+
+
+def _panel_rows_to_wide(rows):
+    if not rows:
+        return pd.DataFrame()
 
     d = pd.DataFrame(rows)
     d["ts"] = pd.to_datetime(d["created_at"], errors="coerce", utc=True).dt.tz_localize(None)
@@ -192,8 +337,7 @@ def fetch_panel_history(days: int):
     # Devices are polled in sequence, so one logical sample is spread over a
     # second or so of wall clock. Snap each burst to its start, or the detected
     # interval collapses and the grid becomes unusable.
-    d = d.sort_values("ts")
-
+    #
     # Group each poll burst into one logical sample.
     #
     # No threshold, because every threshold I tried failed on this data. Gap
@@ -206,7 +350,7 @@ def fetch_panel_history(days: int):
     # cycle, so a device's k-th reading belongs to cycle k. Exact regardless of
     # cadence, stalls, or rate changes, and still correct when a device drops
     # out entirely -- verified against a simulation of all four cases.
-    d = d.sort_values("ts").reset_index(drop=True)
+    d = d.sort_values("ts", kind="stable").reset_index(drop=True)
     d["cycle"] = d.groupby("dev").cumcount()
     d["ts"] = d.groupby("cycle")["ts"].transform("first")
 
@@ -225,16 +369,28 @@ def fetch_panel_history(days: int):
         wide.columns = [f"{short}_{int(c)}" for c in wide.columns]
         frames.append(wide)
     if not frames:
-        return pd.DataFrame(), err
+        return pd.DataFrame()
     out = pd.concat(frames, axis=1).sort_index()
     out = out[~out.index.duplicated(keep="last")]
     out.index.name = "Timestamp"
     out.attrs["cadence_s"] = cadence      # carried on the frame, not in session
-    return out, err
+    out.attrs["devices"] = int(d["dev"].nunique())
+    return out
 
 
-@st.cache_data(ttl=300, show_spinner=False)
 def fetch_sensor_history(days: int):
+    """Recent sensor_readings (irradiance and module temperature).
+
+    Returns (frame, error_message), like fetch_panel_history.
+    """
+    try:
+        return _sensor_history_cached(int(days)), None
+    except _FetchError as exc:
+        return exc.partial, str(exc)
+
+
+@st.cache_data(ttl=HISTORY_TTL_S, show_spinner=False, max_entries=6)
+def _sensor_history_cached(days: int):
     """Pull recent sensor_readings — irradiance and module temperature.
 
     The page checked panel_readings only, so every temperature and irradiance
@@ -244,43 +400,21 @@ def fetch_sensor_history(days: int):
     Rows arrive as a jsonb blob per timestamp with Irr_1..Irr_24 and
     Temp_1..Temp_24 inside, so they expand straight into the wide layout the
     detector wants -- no pivot needed, unlike the meters.
-    """
-    # Returns (frame, error_message). A cached function must not write to the
-    # screen: on a cache hit Streamlit replays whatever the function displayed,
-    # and any reference to a screen element from the earlier run is gone by
-    # then, which raises CacheReplayClosureError. Errors are therefore returned
-    # for the caller to display.
-    since = pd.Timestamp.utcnow().tz_localize(None) - pd.Timedelta(days=days)
-    rows, cursor, guard, err = [], None, 0, None
-    while len(rows) < MAX_ROWS and guard < 2000:
-        guard += 1
-        q = (supabase.table("sensor_readings")
-             .select("created_at,readings")
-             .order("created_at", desc=False)
-             .limit(PAGE_SIZE))
-        q = q.gt("created_at", cursor.isoformat()) if cursor is not None \
-            else q.gte("created_at", since.isoformat())
-        try:
-            batch = q.execute().data or []
-        except Exception as exc:
-            err = f"Couldn't read sensor_readings: {exc}"
-            break
-        if not batch:
-            break
-        rows.extend(batch)
-        nxt = pd.to_datetime(max(r.get("created_at") for r in batch),
-                             errors="coerce", utc=True)
-        if pd.isna(nxt):
-            break
-        nxt = nxt.tz_localize(None)
-        if cursor is not None and nxt <= cursor:
-            nxt = cursor + pd.Timedelta(milliseconds=1)
-        cursor = nxt
-        if len(batch) < PAGE_SIZE:
-            break
 
+    Previously this cached its error message along with the data, so one
+    failed read was replayed for five minutes; errors are now raised uncached.
+    """
+    rows, _truncated, err = _fetch_recent_rows(
+        "sensor_readings", "created_at,readings", days)
+    out = _sensor_rows_to_wide(rows)
+    if err:
+        raise _FetchError(err, out)
+    return out
+
+
+def _sensor_rows_to_wide(rows):
     if not rows:
-        return pd.DataFrame(), err
+        return pd.DataFrame()
 
     flat = []
     for r in rows:
@@ -301,7 +435,7 @@ def fetch_sensor_history(days: int):
     d = d[d.ts.notna()].drop(columns=["created_at"]).set_index("ts").sort_index()
     d = d[~d.index.duplicated(keep="last")]
     d.index.name = "Timestamp"
-    return d.apply(pd.to_numeric, errors="coerce"), err
+    return d.apply(pd.to_numeric, errors="coerce")
 
 
 def _render_findings(records, empty_message):
@@ -348,8 +482,10 @@ def render_anomalies():
         # changed. Accepting it and bounding it here keeps the intent visible.
         days = st.number_input(
             "Days to analyse", min_value=1, max_value=90, value=3, step=1,
-            help=f"About 28,700 readings per day, fetched 1,000 at a time — "
-                 f"roughly 15 seconds per day of data. Three days or more lets "
+            help=f"About 28,700 readings per day, fetched 1,000 at a time in "
+                 f"{FETCH_WORKERS} parallel streams — a few seconds per day of "
+                 f"data, and instant if the same period was fetched in the last "
+                 f"{HISTORY_TTL_S // 60} minutes. Three days or more lets "
                  f"a finding be confirmed rather than left provisional. "
                  f"Requests above {MAX_DAYS} days are reduced to {MAX_DAYS}; "
                  f"for longer periods run detector.py against CSV files.")
@@ -381,6 +517,11 @@ def render_anomalies():
                 st.error(meter_err)
             note.write(f"Fetched {len(wide):,} meter samples. Reading sensors…")
             st.session_state["_fetch_cadence"] = wide.attrs.get("cadence_s")
+            # The short-fetch warning below read these two keys, but nothing
+            # ever set them, so it could never fire.
+            st.session_state["_fetch_rows"] = wide.attrs.get("rows_fetched", 0)
+            st.session_state["_fetch_devices"] = wide.attrs.get("devices", 20)
+            st.session_state["_fetch_truncated"] = wide.attrs.get("truncated", False)
             sensors, sensor_err = fetch_sensor_history(int(days))
             if sensor_err:
                 st.warning(sensor_err)
