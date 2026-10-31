@@ -1,0 +1,6 @@
+[server]
+# Streamlit Community Cloud hosts many apps per machine, and the file watcher
+# takes one of the machine's limited inotify slots. When they run out the app
+# dies with "OSError: [Errno 24] inotify instance limit reached" and then a
+# segmentation fault. A deployed app never needs to watch its own source files.
+fileWatcherType = "none"
