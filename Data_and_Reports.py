@@ -10,28 +10,48 @@ Two ways out of this page:
 Either can carry the weather channels (irradiance and temperature), the DC
 meter data, or both.
 
-Two things about the old version that this fixes:
+Report formats (title, notes, Word/PDF, columns, split, Y-axis limits) can be
+saved by name and re-applied in later sessions -- see report_presets.py.
 
-  * The download button lived inside the "Preview report" block, which itself
-    lived inside "at least one chart column is selected". So you could not
-    download without previewing first, and clearing the column selection made
-    a report you had already built disappear. The button now sits at page
-    level and only depends on there being bytes to hand over.
+Changes from the previous version:
 
-  * Those bytes were never invalidated. Build a Word report, load a different
-    CSV, and the button still served the previous dataset. Every build now
-    records what it was built from, and the button is withdrawn as soon as
-    that no longer matches the screen.
+  * A DC-meter-only report no longer crashes. It has no weather chart, and the
+    report generators now treat "no figure" as a normal case.
+
+  * Timestamps. The raw irradiance CSVs carry separate Date and Time columns.
+    The old code picked "Time" on its own, which parses as time-of-day on
+    today's date, so every row landed in ONE period and "Split by Day" built a
+    single report. Date and Time are now combined. DC-meter timestamps arrive
+    as naive UTC, so they are shifted to site time first; otherwise the
+    07:00-08:00 readings fell into the previous day's report.
+
+  * The file dropdowns sort by the day in the filename. They used to sort by
+    Drive's modified time, so an old day that rclone re-synced jumped to the
+    top and became the default "newest" file.
+
+  * The batch ZIP, like the single report, is withdrawn when the data or
+    settings change after it was built.
 """
 
+import hashlib
 import io
 import re
 import zipfile
+from datetime import date
 
-import streamlit as st
 import pandas as pd
+import streamlit as st
 
+from drive_fetch import (
+    list_available_csvs,
+    download_csv_as_df,
+    format_file_label,
+    list_available_dcm_csvs,
+    download_dcm_csv_as_df,
+)
+from report_presets import render_preset_bar
 from ui_sections import (
+    SITE_ZONE,
     require_login,
     page_stamp,
     close_figures,
@@ -39,13 +59,6 @@ from ui_sections import (
     preview_report_content,
     generate_word_report,
     generate_pdf_report,
-)
-from drive_fetch import (
-    list_available_csvs,
-    download_csv_as_df,
-    format_file_label,
-    list_available_dcm_csvs,
-    download_dcm_csv_as_df,
 )
 
 
@@ -80,32 +93,15 @@ CONTENT_BOTH = "Both"
 # Matplotlib cannot show more points than the figure has pixels, but it will
 # happily try. With 72 columns selected on a 7,590-row file that is 546,000
 # points, each one first copied into a Python list -- minutes of work for a
-# picture that is a few hundred pixels wide.
-#
-# Worse, an unparsed time column is a column of strings, which matplotlib
-# treats as CATEGORIES: one tick position per distinct value, so 7,590 of them,
-# laid out and measured. That, not the line count, is what makes the page look
-# frozen. _axis_time below converts to real datetimes so the axis becomes
-# numeric, and _thin caps the rows.
+# picture that is a few hundred pixels wide. _thin caps the rows, and
+# _axis_time hands matplotlib real datetimes so the time axis is numeric
+# rather than thousands of text categories.
 CHART_MAX_POINTS = 3_000
 
 # Past this many lines the chart is unreadable anyway, and it is nearly always
 # an accident -- "Select all" on a 48-column file, or Irr_* and IrrAvg_* both
 # matching the same guess.
 CHART_WARN_SERIES = 16
-
-
-def _axis_time(frame):
-    """The x values for a chart: real datetimes where possible.
-
-    Falls back to the raw column, which plots as categories -- correct, just
-    slow -- and finally to the index.
-    """
-    col = _find_time_column(frame)
-    if col is None:
-        return frame.index
-    parsed = pd.to_datetime(frame[col], errors="coerce")
-    return parsed if parsed.notna().mean() >= 0.5 else frame[col]
 
 
 def _thin(frame):
@@ -139,7 +135,8 @@ def _find_time_column(frame):
     head = frame.head(200)
     for col in frame.columns:
         dtype = str(head[col].dtype)
-        if not (dtype == "object" or dtype.startswith("datetime")):
+        if not (dtype == "object" or dtype.startswith("datetime")
+                or dtype.startswith("str")):
             continue
         parsed = pd.to_datetime(head[col], errors="coerce")
         if parsed.notna().mean() >= 0.9:
@@ -147,27 +144,55 @@ def _find_time_column(frame):
     return None
 
 
-def _time_index(frame):
-    """A datetime Series aligned to the frame's own index, or None."""
+def _timestamps(frame):
+    """A datetime Series aligned to the frame's own index, or None.
+
+    Order of preference: a datetime index; a Date column plus a Time column
+    (the raw irradiance CSVs -- "Time" alone is only a time of day, and parses
+    as today's date); then whichever single column looks like timestamps.
+    """
     if frame is None or frame.empty:
         return None
 
     if isinstance(frame.index, pd.DatetimeIndex):
         return pd.Series(frame.index, index=frame.index)
 
+    lowered = {str(c).strip().lower(): c for c in frame.columns}
+    date_col, time_col = lowered.get("date"), lowered.get("time")
+    if date_col is not None and time_col is not None:
+        stamped = (frame[date_col].astype(str).str.strip() + " "
+                   + frame[time_col].astype(str).str.strip())
+        # Naming the format matters at this size: left to infer, pandas hands
+        # every one of a day's ~17,000 rows to dateutil individually.
+        ts = pd.to_datetime(stamped, format="%Y-%m-%d %H:%M:%S", errors="coerce")
+        if ts.notna().sum() == 0:
+            ts = pd.to_datetime(stamped, errors="coerce")
+        if ts.notna().sum() > 0:
+            return ts
+
     col = _find_time_column(frame)
     if col is None:
         return None
-
     ts = pd.to_datetime(frame[col], errors="coerce")
-    if ts.notna().sum() == 0:
-        return None
-    return ts
+    return ts if ts.notna().sum() > 0 else None
+
+
+def _axis_time(frame):
+    """The x values for a chart: real datetimes where possible.
+
+    Falls back to the raw column, which plots as categories -- correct, just
+    slow -- and finally to the index.
+    """
+    ts = _timestamps(frame)
+    if ts is not None and ts.notna().mean() >= 0.5:
+        return ts
+    col = _find_time_column(frame)
+    return frame.index if col is None else frame[col]
 
 
 def _periods(frame, granularity):
     """Period labels for every row, aligned to the frame's index."""
-    ts = _time_index(frame)
+    ts = _timestamps(frame)
     if ts is None:
         return None
     return ts.dt.to_period(PERIOD_CODE[granularity])
@@ -182,9 +207,47 @@ def _slice(frame, periods, target):
     return part if len(part) else None
 
 
+def _dcm_to_local(frame):
+    """Shift the DC meter's created_at from naive UTC to site time.
+
+    drive_fetch localises the file's local timestamps and converts them to
+    UTC, which is what the live pages want. For a per-day report it puts the
+    07:00-08:00 readings (23:00-24:00 UTC) on the previous day.
+    """
+    if frame is None or "created_at" not in frame.columns:
+        return frame
+    out = frame.copy()
+    ts = pd.to_datetime(out["created_at"], errors="coerce")
+    if getattr(ts.dt, "tz", None) is None:
+        ts = ts.dt.tz_localize("UTC")
+    out["created_at"] = ts.dt.tz_convert(SITE_ZONE).dt.tz_localize(None)
+    return out
+
+
 def _slug(text, fallback="report"):
     out = re.sub(r"[^A-Za-z0-9._-]+", "_", str(text)).strip("_")
     return out or fallback
+
+
+# ---------------------------------------------------------------------------
+#  File listings
+# ---------------------------------------------------------------------------
+
+def _newest_first(files):
+    """Newest DATA first. drive_fetch sorts by Drive's modified time, which an
+    rclone re-sync of an old day resets -- that day then headed the list and
+    was preselected as the 'most recent' file."""
+    return sorted(
+        files or [],
+        key=lambda f: (f.get("data_date") or date.min, f.get("modifiedTime", "")),
+        reverse=True,
+    )
+
+
+def _file_label(entry):
+    day = entry.get("data_date")
+    base = format_file_label(entry)
+    return f"{day} · {base}" if day else base
 
 
 # ---------------------------------------------------------------------------
@@ -217,7 +280,7 @@ def _figure_for(part, temps, irrs, temp_ylim, irr_ylim):
 
 
 def _build_report(fmt, df_part, dcm_part, title, observation, fig):
-    """One document, as bytes, plus the extension it should be saved under."""
+    """One document, as bytes, plus the extension and MIME type to serve it as."""
     if fmt.startswith("Word"):
         data = generate_word_report(df_part, title, observation, fig,
                                     df_dcm=dcm_part)
@@ -234,8 +297,7 @@ def _report_parts(content, df_part, dcm_part):
     """What to hand the generator for the chosen content.
 
     An empty DataFrame rather than None for the weather half of a DC-only
-    report: the generators take it as a positional argument and are far more
-    likely to survive `.empty` / `.shape` on an empty frame than on None.
+    report, because the generators take it as a positional argument.
     """
     if content == CONTENT_DCM:
         return pd.DataFrame(), dcm_part
@@ -260,10 +322,8 @@ def _render_single(df, df_dcm, report_title, observation, fig, signature):
             preview_report_content(df, report_title, observation, fig,
                                    df_dcm=df_dcm)
 
-    # Both documents used to be generated on EVERY rerun, before either
-    # download button was clicked -- so moving a slider silently rendered a
-    # Word file and a PDF, embedding matplotlib images each time. Build only
-    # on request.
+    # Build only on request: both documents used to be generated on EVERY
+    # rerun, so moving a slider silently rendered a Word file and a PDF.
     fmt_col, build_col = st.columns([2, 1])
     with fmt_col:
         fmt = st.radio("Report format", ["Word (.docx)", "PDF"],
@@ -340,12 +400,15 @@ def _render_batch(df, df_dcm, report_title, observation,
     per_weather = _periods(df, gran) if use_weather else None
     per_dcm = _periods(df_dcm, gran) if use_dcm else None
 
-    if per_weather is None and per_dcm is None:
+    if use_weather and per_weather is None and (not use_dcm or per_dcm is None):
         st.error(
             "Couldn't find a timestamp column to split on. The file needs a "
-            "column named Time, Timestamp, Datetime, Date or created_at, or a "
-            "datetime index."
+            "Date and Time column, or a single column named Timestamp, "
+            "Datetime or created_at, or a datetime index."
         )
+        return
+    if use_dcm and per_dcm is None and (not use_weather or per_weather is None):
+        st.error("The DC meter file has no usable timestamps to split on.")
         return
 
     if use_weather and per_weather is None:
@@ -376,9 +439,13 @@ def _render_batch(df, df_dcm, report_title, observation,
             f"for the rest."
         )
 
+    # The key changes with the options, so switching Split-by (or loading a
+    # different file) starts from a fresh default instead of carrying over
+    # labels that no longer exist.
+    options_id = hashlib.md5("|".join(labels).encode()).hexdigest()[:10]
     chosen = st.multiselect(
         "Periods", options=labels, default=labels[:MAX_REPORTS],
-        key="batch_periods",
+        key=f"batch_periods_{options_id}",
         help="Every period found in the loaded file. Deselect any you don't "
              "need.")
 
@@ -389,11 +456,20 @@ def _render_batch(df, df_dcm, report_title, observation,
         st.caption("Select at least one period.")
         return
 
+    # What this ZIP would be built from. If any of it differs from the ZIP
+    # sitting in session state, that ZIP describes something else.
+    signature = (
+        st.session_state.get("_loaded_filename") if use_weather else None,
+        st.session_state.get("_loaded_dcm_filename") if use_dcm else None,
+        report_title, observation, content, gran, fmt, tuple(chosen),
+        tuple(selected_temps), tuple(selected_irradiance), temp_ylim, irr_ylim,
+    )
+
     st.caption(f"{len(chosen)} document(s) will be built.")
 
     if not st.button(f"Build {len(chosen)} report(s)", type="primary",
                      key="batch_build"):
-        _offer_batch_download()
+        _offer_batch_download(signature)
         return
 
     progress = st.progress(0.0, text="Starting…")
@@ -457,15 +533,20 @@ def _render_batch(df, df_dcm, report_title, observation,
         return
 
     st.session_state["_batch_zip"] = buf.getvalue()
+    st.session_state["_batch_sig"] = signature
     st.session_state["_batch_name"] = (
         f"{_slug(report_title, 'PV_Reports')}_{gran.lower()}ly.zip")
     st.success(f"Built {written} report(s).")
-    _offer_batch_download()
+    _offer_batch_download(signature)
 
 
-def _offer_batch_download():
+def _offer_batch_download(signature):
     data = st.session_state.get("_batch_zip")
     if not data:
+        return
+    if st.session_state.get("_batch_sig") != signature:
+        st.caption("The data or settings changed since the last ZIP was "
+                   "built — build again to refresh it.")
         return
     st.download_button(
         label=f"Download {st.session_state['_batch_name']} "
@@ -493,7 +574,7 @@ def render_data_reports():
     # -------------------------
     st.subheader("Data source")
 
-    available_files = list_available_csvs()
+    available_files = _newest_first(list_available_csvs())
     df = None
 
     if not available_files:
@@ -506,12 +587,12 @@ def render_data_reports():
             with st.expander("Error details"):
                 st.code(st.session_state["_drive_list_error"])
     else:
-        file_labels = [format_file_label(f) for f in available_files]
+        file_labels = [_file_label(f) for f in available_files]
         selected_idx = st.selectbox(
-            "CSV file (most recent first)",
+            "CSV file (newest data first)",
             options=range(len(available_files)),
             format_func=lambda i: file_labels[i],
-            index=0,  # defaults to the newest file
+            index=0,  # defaults to the newest day
         )
         selected_file = available_files[selected_idx]
 
@@ -536,7 +617,7 @@ def render_data_reports():
     # -------------------------
     st.subheader("DC meter data (optional)")
 
-    available_dcm_files = list_available_dcm_csvs()
+    available_dcm_files = _newest_first(list_available_dcm_csvs())
     df_dcm = None
 
     if not available_dcm_files:
@@ -548,9 +629,9 @@ def render_data_reports():
             with st.expander("Error details"):
                 st.code(st.session_state["_dcm_drive_list_error"])
     else:
-        dcm_labels = [format_file_label(f) for f in available_dcm_files]
+        dcm_labels = [_file_label(f) for f in available_dcm_files]
         dcm_selected_idx = st.selectbox(
-            "DC meter CSV file (most recent first)",
+            "DC meter CSV file (newest data first)",
             options=range(len(available_dcm_files)),
             format_func=lambda i: dcm_labels[i],
             index=0,
@@ -560,7 +641,8 @@ def render_data_reports():
 
         if st.button("Load DC meter file"):
             try:
-                df_dcm = download_dcm_csv_as_df(selected_dcm_file["id"])
+                df_dcm = _dcm_to_local(
+                    download_dcm_csv_as_df(selected_dcm_file["id"]))
                 st.session_state["_loaded_dcm_df"] = df_dcm
                 st.session_state["_loaded_dcm_filename"] = selected_dcm_file["name"]
                 st.success(
@@ -573,8 +655,17 @@ def render_data_reports():
             st.caption(
                 f"Currently loaded: {st.session_state.get('_loaded_dcm_filename', '')}")
 
-    report_title = st.text_input("Report Title", "Bifacial PV Performance Report")
-    observation = st.text_area("Observation Notes")
+    # -------------------------
+    # Saved report formats, then the title and notes they fill in
+    # -------------------------
+    render_preset_bar()
+
+    # Defaults go in session state rather than `value=`: a widget that has both
+    # a default and a value set from session state (which is what applying a
+    # saved format does) makes Streamlit print a warning.
+    st.session_state.setdefault("report_title", "Bifacial PV Performance Report")
+    report_title = st.text_input("Report Title", key="report_title")
+    observation = st.text_area("Observation Notes", key="observation")
 
     if df is None:
         # The DC meter data can still be batched on its own.
@@ -593,7 +684,7 @@ def render_data_reports():
     info_a.metric("Rows", f"{df.shape[0]:,}")
     info_b.metric("Columns", f"{df.shape[1]:,}")
 
-    time = df["Time"] if "Time" in df.columns else df.index
+    n_rows = len(df)
     numeric_cols = df.select_dtypes(include="number").columns.tolist()
 
     st.subheader("Chart columns")
@@ -654,30 +745,35 @@ def render_data_reports():
     fig = None
 
     if selected_temps or selected_irradiance:
+        for key, default in (("temp_y_auto", True), ("temp_y_min", 0.0),
+                             ("temp_y_max", 50.0), ("irr_y_auto", True),
+                             ("irr_y_min", 0.0), ("irr_y_max", 1200.0)):
+            st.session_state.setdefault(key, default)
+
         with st.expander("📐 Chart scale (optional)"):
             st.caption(
-                "Time is a categorical axis here, so the X range trims "
-                "which rows are plotted rather than setting numeric bounds."
+                "The X range trims which rows are plotted; the Y ranges fix "
+                "the axis limits."
             )
-            n_rows = len(time)
             x_start, x_end = st.slider(
-                "X range (row index)", 0, max(n_rows - 1, 1), (0, max(n_rows - 1, 1))
+                "X range (row index)", 0, max(n_rows - 1, 1),
+                (0, max(n_rows - 1, 1))
             )
 
             temp_y_col, irr_y_col = st.columns(2)
             with temp_y_col:
                 st.caption("Temperature Y-axis (°C)")
-                temp_auto = st.checkbox("Auto", value=True, key="temp_y_auto")
-                temp_y_min = st.number_input("Min", value=0.0, key="temp_y_min",
+                temp_auto = st.checkbox("Auto", key="temp_y_auto")
+                temp_y_min = st.number_input("Min", key="temp_y_min",
                                              disabled=temp_auto)
-                temp_y_max = st.number_input("Max", value=50.0, key="temp_y_max",
+                temp_y_max = st.number_input("Max", key="temp_y_max",
                                              disabled=temp_auto)
             with irr_y_col:
                 st.caption("Irradiance Y-axis (W/m²)")
-                irr_auto = st.checkbox("Auto", value=True, key="irr_y_auto")
-                irr_y_min = st.number_input("Min", value=0.0, key="irr_y_min",
+                irr_auto = st.checkbox("Auto", key="irr_y_auto")
+                irr_y_min = st.number_input("Min", key="irr_y_min",
                                             disabled=irr_auto)
-                irr_y_max = st.number_input("Max", value=1200.0, key="irr_y_max",
+                irr_y_max = st.number_input("Max", key="irr_y_max",
                                             disabled=irr_auto)
 
         temp_ylim = None if temp_auto else (temp_y_min, temp_y_max)
@@ -691,11 +787,8 @@ def render_data_reports():
                 f"“Remove all” and pick the handful you actually want to show."
             )
 
-        # Slice the Series, then convert -- the old version turned every
-        # selected column into a full Python list before trimming it, which on
-        # a 124,000-row file with 24 columns selected is a lot of work to throw
-        # away. Then thin the rows: a chart a few hundred pixels wide cannot
-        # show 7,590 of them, let alone 7,590 x 72.
+        # Slice, thin, then convert: a chart a few hundred pixels wide cannot
+        # show 7,590 rows, let alone 7,590 x 72.
         sliced = df.iloc[x_start:x_end + 1]
         thin, step = _thin(sliced)
         if step > 1:
@@ -715,7 +808,7 @@ def render_data_reports():
         # No chart, but the report is still buildable -- a DC-meter-only
         # document has no weather trace to draw, and requiring one is what
         # made that combination unreachable before.
-        x_start, x_end = 0, max(len(df) - 1, 0)
+        x_start, x_end = 0, max(n_rows - 1, 0)
         st.caption("No chart columns selected. Reports will be built without "
                    "a weather chart.")
 
@@ -724,9 +817,20 @@ def render_data_reports():
     single_options = [CONTENT_WEATHER]
     if df_dcm is not None:
         single_options += [CONTENT_DCM, CONTENT_BOTH]
+    # Default to the fullest choice. When the options change (a DC file gets
+    # loaded) move to the new fullest one, as the page always has; otherwise
+    # leave the user's pick -- or a saved format's -- alone unless it names an
+    # option this session doesn't offer (a DC meter choice with no DC file).
+    options_now = tuple(single_options)
+    options_before = st.session_state.get("_single_options")
+    st.session_state["_single_options"] = options_now
+    if options_before is not None and options_before != options_now:
+        st.session_state["single_content"] = single_options[-1]
+    elif st.session_state.get("single_content") not in single_options:
+        st.session_state["single_content"] = single_options[-1]
     single_content = st.radio(
         "Include in the single report", single_options,
-        index=len(single_options) - 1, horizontal=True, key="single_content")
+        horizontal=True, key="single_content")
 
     # What the current build corresponds to. If any of it changes, the
     # bytes sitting in session state are describing something else.
@@ -739,11 +843,13 @@ def render_data_reports():
     )
 
     # The report gets the same rows the chart does, so "as framed on screen"
-    # is literally true rather than approximately.
+    # is literally true rather than approximately. A DC-only report carries no
+    # weather chart even when one is on screen.
     single_df, single_dcm = _report_parts(
         single_content, df.iloc[x_start:x_end + 1], df_dcm)
+    report_fig = None if single_content == CONTENT_DCM else fig
     _render_single(single_df, single_dcm, report_title, observation,
-                   fig, signature)
+                   report_fig, signature)
 
     _render_batch(df, df_dcm, report_title, observation,
                   selected_temps, selected_irradiance, temp_ylim, irr_ylim)
