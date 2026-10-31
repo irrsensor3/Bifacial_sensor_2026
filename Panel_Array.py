@@ -8,6 +8,7 @@ from ui_sections import (
     fetch_recent_alerts,
     get_sensor_logging_config,
     set_sensor_logging_mode,
+    latest_per_column,
 )
 
 # =========================
@@ -101,13 +102,10 @@ _PANEL_CSS = """
 """
 
 
-def _read_irradiance(df_live: pd.DataFrame, sensor_id: int):
-    """Latest irradiance for one sensor, or None when the column is absent."""
-    col = _irr_column_for(sensor_id)
-    if df_live.empty or col not in df_live.columns:
-        return None
-    val = pd.to_numeric(df_live.iloc[-1][col], errors="coerce")
-    return float(val) if pd.notna(val) else None
+def _read_irradiance(latest: dict, sensor_id: int):
+    """Latest irradiance for one sensor, or None when it has no reading in
+    the recent window."""
+    return latest.get(_irr_column_for(sensor_id))
 
 
 def _last_subzero_alert(df_alerts: pd.DataFrame, sensor_id: int):
@@ -136,8 +134,6 @@ def render_panel_array():
     page_stamp("Panel Array")
     st.markdown(_PANEL_CSS, unsafe_allow_html=True)
 
-    is_admin = st.session_state.get("user_role") == "admin"
-
     st.title("Panel array")
     st.caption(
         "Each strip below is one physical row: a front sensor at each short "
@@ -145,7 +141,22 @@ def render_panel_array():
         "latest irradiance reading. Select a sensor for its full detail."
     )
 
-    df_live = fetch_latest_readings(limit=1)
+    # A fragment, so selecting a sensor reruns only the grid and its detail
+    # panel. Every click used to rerun the whole app -- login check, theme,
+    # the overview banner with its photo, two database reads and the array
+    # drawing -- just to move a highlight.
+    _panel_array_fragment()
+
+
+@st.fragment
+def _panel_array_fragment():
+    is_admin = st.session_state.get("user_role") == "admin"
+
+    # The same cached 200-row window the overview banner already fetched, so
+    # this costs no extra query. It asked for limit=1 before -- a separate
+    # query, and a single row in which the logger leaves most sensors blank,
+    # so most of the array showed "no reading".
+    df_live = fetch_latest_readings()
     df_alerts = fetch_recent_alerts()
     # Logging configuration is admin-only.
     # Normal users do not need to fetch the configuration.
@@ -162,7 +173,8 @@ def render_panel_array():
     # so the strip shows relative irradiance across the array at a glance.
     all_ids = [sid for cfg in SENSOR_LAYOUT
                for sid in [cfg["front_a"], *cfg["panel_sensors"], cfg["front_b"]]]
-    readings = {sid: _read_irradiance(df_live, sid) for sid in all_ids}
+    latest = latest_per_column(df_live, [_irr_column_for(sid) for sid in all_ids])
+    readings = {sid: _read_irradiance(latest, sid) for sid in all_ids}
     live_vals = [v for v in readings.values() if v is not None]
     peak = max(live_vals) if live_vals else None
 
