@@ -703,6 +703,33 @@ def solar_day_bar(when=None):
     )
 
 
+@st.cache_resource(show_spinner=False)
+def _hero_image_b64(path="BifacialGrid.jpeg"):
+    """The array photo, shrunk and base64-encoded ONCE per server process.
+
+    This used to read and encode the full 1280 px, 139 KB file on every rerun
+    of every page, then ship ~185 KB of base64 to the browser each time. The
+    photo sits under a 55-96% dark gradient, so 1024 px at JPEG quality 62 is
+    indistinguishable on screen at half the bytes. Falls back to the original
+    file if Pillow can't open it, and to None if there is no file at all.
+    """
+    try:
+        from PIL import Image
+        with Image.open(path) as im:
+            im = im.convert("RGB")
+            im.thumbnail((1024, 1024))
+            buf = BytesIO()
+            im.save(buf, "JPEG", quality=62, optimize=True, progressive=True)
+            data = buf.getvalue()
+    except Exception:
+        try:
+            with open(path, "rb") as fh:
+                data = fh.read()
+        except Exception:
+            return None
+    return base64.b64encode(data).decode()
+
+
 def _bg_image_css(path="BifacialGrid.jpeg"):
     """Inline the array photo as a CSS background.
 
@@ -710,14 +737,12 @@ def _bg_image_css(path="BifacialGrid.jpeg"):
     file 404s. Base64 keeps it in the stylesheet and works everywhere,
     including once this is deployed.
     """
-    try:
-        with open(path, "rb") as fh:
-            b64 = base64.b64encode(fh.read()).decode()
+    b64 = _hero_image_b64(path)
+    if b64:
         return f"background-image:url('data:image/jpeg;base64,{b64}');"
-    except Exception:
-        # No photo on disk: fall back to a gradient rather than a blank slab.
-        return ("background-image:linear-gradient(120deg,#12283B 0%,"
-                "#1E4257 55%,#C77A16 140%);")
+    # No photo on disk: fall back to a gradient rather than a blank slab.
+    return ("background-image:linear-gradient(120deg,#12283B 0%,"
+            "#1E4257 55%,#C77A16 140%);")
 
 
 def hero(title, subtitle, stats=None, eyebrow="Bifacial PV monitoring"):
@@ -1105,6 +1130,39 @@ def plot_gauge(value, max_value, title, unit="", color="#C77A16"):
 
 
 
+# Points per trace sent to the browser. A chart is ~1,000-1,400 px wide, so
+# more points than this cannot be seen -- they only cost encoding time on the
+# server, websocket bytes on every auto-refresh tick, and drawing time in the
+# browser.
+LINE_CHART_MAX_POINTS = 1200
+
+
+def minmax_decimate(y, max_points=LINE_CHART_MAX_POINTS):
+    """Positions of the points to keep so a line keeps its true shape.
+
+    Splits the series into max_points/2 equal buckets and keeps each bucket's
+    lowest AND highest reading, in time order. Every-Nth-row thinning (what the
+    pages did before) silently drops short spikes and dips -- exactly the cloud
+    edges and dropouts someone is looking for -- while this keeps every peak
+    and trough visible at any zoom-out. Returns None when no thinning is needed.
+    """
+    y = np.asarray(y, dtype="float64")
+    n = len(y)
+    if n <= max_points or max_points < 4:
+        return None
+    buckets = max_points // 2
+    size = -(-n // buckets)                      # ceil
+    padded = np.full(buckets * size, np.nan)
+    padded[:n] = y
+    grid = padded.reshape(buckets, size)
+    lo = np.where(np.isnan(grid), np.inf, grid).argmin(axis=1)
+    hi = np.where(np.isnan(grid), -np.inf, grid).argmax(axis=1)
+    base = np.arange(buckets) * size
+    keep = np.concatenate([base + lo, base + hi, [0, n - 1]])
+    keep = np.unique(keep[keep < n])             # sorted, de-duplicated
+    return keep
+
+
 def plot_line_chart(
     df,
     x_col,
@@ -1113,14 +1171,18 @@ def plot_line_chart(
     y_range=None,
     y_title="",
     x_title="",
+    max_points=LINE_CHART_MAX_POINTS,
 ):
     import plotly.graph_objects as go
     import pandas as pd
 
     fig = go.Figure()
 
-    # Make a copy so we don't modify the original dataframe
-    plot_df = df.copy()
+    # Only the columns being drawn are copied -- the caller's frame may carry
+    # dozens of others, and copying all of them on every refresh tick was
+    # wasted work.
+    keep_cols = [x_col] + [c for c in y_cols if c in df.columns and c != x_col]
+    plot_df = df[keep_cols].copy()
 
     # Make sure timestamp is actually datetime
     plot_df[x_col] = pd.to_datetime(
@@ -1128,8 +1190,9 @@ def plot_line_chart(
         errors="coerce"
     )
 
-    # Sort chronologically
-    plot_df = plot_df.sort_values(x_col)
+    # Sort chronologically (skipped when it already is, which is the usual case)
+    if not plot_df[x_col].is_monotonic_increasing:
+        plot_df = plot_df.sort_values(x_col)
 
     for col in y_cols:
 
@@ -1149,11 +1212,12 @@ def plot_line_chart(
             "y": y_data,
         }).dropna(subset=["x", "y"])
 
-        # Debugging information
-        print(
-            f"Plotting {col}: "
-            f"{len(trace_df)} valid points"
-        )
+        # Thin each trace on its own, after dropping its blanks. Thinning the
+        # whole frame first threw away most of a sparse column (temperature is
+        # logged once a minute against irradiance every few seconds).
+        keep = minmax_decimate(trace_df["y"].to_numpy(), max_points)
+        if keep is not None:
+            trace_df = trace_df.iloc[keep]
 
         fig.add_trace(
             go.Scatter(
@@ -1455,9 +1519,22 @@ def preview_report_content(df, report_title, observation, fig, df_dcm=None):
 
     # Weather Graph -- st.pyplot(None) would draw whatever stale figure
     # matplotlib still holds, so skip the section when there is no chart.
+    # Accepts the already-rendered PNG as well as a figure, so the preview can
+    # reuse the chart drawn on the page instead of re-rendering it.
     if report_data['figure'] is not None:
         st.markdown("## Weather Graph")
-        st.pyplot(report_data['figure'])
+        if isinstance(report_data['figure'], (bytes, bytearray)):
+            st.image(report_data['figure'])
+        else:
+            st.pyplot(report_data['figure'])
+
+
+def figure_png(fig, dpi=200):
+    """A matplotlib figure as PNG bytes, rendered the way st.pyplot renders it
+    (200 dpi, tight bounding box), so a cached image looks identical."""
+    buf = BytesIO()
+    fig.savefig(buf, format="png", dpi=dpi, bbox_inches="tight")
+    return buf.getvalue()
 
 
 def _word_table(doc, rows):
@@ -1702,8 +1779,22 @@ def _safe_query(table: str, limit: int, label: str):
 # database query on every rerun -- including every auto-refresh tick -- and,
 # more visibly, `.clear()` does not exist on an uncached function, so the
 # Refresh now button raised AttributeError and took the page down.
-@st.cache_data(ttl=5)
-def fetch_latest_readings(limit=50):
+# One window size for every caller. Live Monitoring asked for 50 rows while
+# the overview banner and Panel Array asked for 200 and 1, so the same table
+# was queried two or three times per page load under different cache keys.
+# 200 rows is what the banner needs (the logger leaves most cells blank in any
+# given row), and everyone else can use the same cached frame.
+LIVE_ROWS = 200
+
+
+# show_spinner=False on these three: the overview banner calls them from
+# inside another cached function (fetch_overview_frames), and a spinner raised
+# by a nested cache miss gets recorded and replayed with the outer result. On
+# some Streamlit versions that shifted the page layout and snapped open
+# expanders shut on the next refresh. It also stops a "Running
+# fetch_latest_readings()" line flashing up on every auto-refresh tick.
+@st.cache_data(ttl=5, show_spinner=False)
+def fetch_latest_readings(limit=LIVE_ROWS):
     rows = _safe_query("sensor_readings", limit, "sensor readings")
     if not rows:
         return pd.DataFrame()
@@ -1720,7 +1811,10 @@ def fetch_latest_readings(limit=50):
     return df_live
 
 
-@st.cache_data(ttl=5)
+# Sub-zero alerts are rare and the page only asks "has one fired in the last
+# 150 seconds", so a 30-second cache answers that just as well -- and saves a
+# database round trip on almost every auto-refresh tick.
+@st.cache_data(ttl=30, show_spinner=False)
 def fetch_recent_alerts(limit=200):
     rows = _safe_query("sensor_alerts", limit, "sensor alerts")
     if not rows:
@@ -1731,8 +1825,8 @@ def fetch_recent_alerts(limit=200):
     return df
 
 
-@st.cache_data(ttl=5)
-def fetch_latest_panel_readings(limit=200):
+@st.cache_data(ttl=5, show_spinner=False)
+def fetch_latest_panel_readings(limit=LIVE_ROWS):
     rows = _safe_query("panel_readings", limit, "panel meter readings")
     if not rows:
         return pd.DataFrame()
@@ -1740,3 +1834,18 @@ def fetch_latest_panel_readings(limit=200):
     df_panel = pd.DataFrame(rows)
     df_panel = df_panel.sort_values("created_at")  # oldest -> newest for plotting
     return df_panel
+
+
+# The overview banner runs at the top of EVERY page, on every full rerun. With
+# the 5-second cache above, almost any click on a non-live page (a checkbox,
+# a title letter, a sensor tile) cost two database round trips just to redraw
+# the banner. The banner gets its own 30-second layer on top: it shows a
+# "Last sample" time and an age, so it stays honest about how fresh it is,
+# and the live charts still use the 5-second data underneath.
+OVERVIEW_TTL_S = 30
+
+
+@st.cache_data(ttl=OVERVIEW_TTL_S, show_spinner=False)
+def fetch_overview_frames():
+    """(sensor readings, panel readings) for the overview banner."""
+    return fetch_latest_readings(), fetch_latest_panel_readings()
