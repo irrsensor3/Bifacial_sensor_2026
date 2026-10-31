@@ -2,6 +2,7 @@ import streamlit as st
 import numpy as np
 import pandas as pd
 from docx import Document
+from docx.shared import Inches
 from io import BytesIO
 from datetime import datetime
 import math
@@ -1236,7 +1237,17 @@ def plot_weather_signals(time, temperatures, irradiances, title="Weather Data", 
     # with real time strings. pandas' Series.astype(str) doesn't
     # reliably convert every value (some floats can slip through), so
     # convert element-by-element with plain Python str() instead.
-    time = [str(t) for t in time]
+    #
+    # Real datetimes are the exception: they are passed through as datetimes so
+    # matplotlib builds a numeric time axis. Stringifying them made every
+    # distinct timestamp its own category -- thousands of tick positions laid
+    # out and measured, which is what made the chart crawl.
+    _t = pd.Series(list(time))
+    is_datetime = pd.api.types.is_datetime64_any_dtype(_t)
+    if is_datetime or pd.api.types.is_numeric_dtype(_t):
+        time = _t.to_numpy()
+    else:
+        time = [str(t) for t in time]
 
     fig, ax1 = plt.subplots(figsize=(12, 6))
 
@@ -1263,6 +1274,8 @@ def plot_weather_signals(time, temperatures, irradiances, title="Weather Data", 
     lines2, labels2 = ax2.get_legend_handles_labels()
     ax1.legend(lines1 + lines2, labels1 + labels2, loc="upper left")
 
+    if is_datetime:
+        fig.autofmt_xdate()
     fig.tight_layout()
     return fig
 
@@ -1306,24 +1319,58 @@ def plot_irradiance_frequency(df, columns, bin_width=50, max_irr=1200):
 # REPORT DATA BUILDERS & RENDERERS
 # =========================
 
+def _pdf_text(value):
+    """fpdf's built-in Helvetica only covers Latin-1. The em dash in batch
+    titles ("... — 2026-10-21") and in DC table rows ("Meter 11 — Voltage (V)")
+    is not in it, and neither are curly quotes pasted into the notes, so each
+    raised an encoding error. Map the usual suspects to plain ASCII and replace
+    anything else rather than crash."""
+    s = str(value)
+    for bad, good in (("\u2014", "-"), ("\u2013", "-"), ("\u2018", "'"),
+                      ("\u2019", "'"), ("\u201c", '"'), ("\u201d", '"'),
+                      ("\u2026", "...")):
+        s = s.replace(bad, good)
+    return s.encode("latin-1", "replace").decode("latin-1")
+
+
 def build_report_data(df, report_title, observation, fig, df_dcm=None):
     """Build uniform report data structure. df_dcm is optional DC
     meter data (Datetime/Device_ID/... columns already standardized
     to created_at/device_id/... by drive_fetch) — when provided, adds
-    a per-device DC meter summary table alongside the sensor summary."""
-    start_time = f"{df['Date'].iloc[0]} {df['Time'].iloc[0]}" if "Date" in df.columns and "Time" in df.columns else "N/A"
-    end_time = f"{df['Date'].iloc[-1]} {df['Time'].iloc[-1]}" if "Date" in df.columns and "Time" in df.columns else "N/A"
+    a per-device DC meter summary table alongside the sensor summary.
 
-    metadata = [
-        ("Generated Date", datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
-        ("Total Records", str(df.shape[0])),
-        ("Total Columns", str(df.shape[1])),
+    df may be empty (a DC-meter-only report) and fig may be None (no chart
+    columns selected, or a DC-only report); both are handled."""
+    df = df if df is not None else pd.DataFrame()
+    has_weather = not df.empty
+    has_dcm = df_dcm is not None and not df_dcm.empty
+
+    start_time = end_time = "N/A"
+    if has_weather and "Date" in df.columns and "Time" in df.columns:
+        start_time = f"{df['Date'].iloc[0]} {df['Time'].iloc[0]}"
+        end_time = f"{df['Date'].iloc[-1]} {df['Time'].iloc[-1]}"
+    elif has_dcm and "created_at" in df_dcm.columns:
+        # A DC-only report has no Date/Time columns; take the span from the
+        # meter timestamps instead of printing N/A.
+        stamps = pd.to_datetime(df_dcm["created_at"], errors="coerce").dropna()
+        if len(stamps):
+            start_time, end_time = str(stamps.min()), str(stamps.max())
+
+    metadata = [("Generated Date", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))]
+    if has_weather or not has_dcm:
+        metadata += [
+            ("Total Records", str(df.shape[0])),
+            ("Total Columns", str(df.shape[1])),
+        ]
+    if has_dcm:
+        metadata.append(("DC Meter Records", str(df_dcm.shape[0])))
+    metadata += [
         ("Start Time", start_time),
         ("End Time", end_time),
-        ("Observation Notes", observation if observation else "")
+        ("Observation Notes", observation if observation else ""),
     ]
 
-    columns_list = ", ".join(df.columns)
+    columns_list = ", ".join(str(c) for c in df.columns)
 
     numeric_df = df.select_dtypes(include="number")
     numeric_summary = None
@@ -1339,7 +1386,7 @@ def build_report_data(df, report_title, observation, fig, df_dcm=None):
             })
 
     dcm_summary = None
-    if df_dcm is not None and not df_dcm.empty and "device_id" in df_dcm.columns:
+    if has_dcm and "device_id" in df_dcm.columns:
         metric_defs = [
             ("voltage_v", "Voltage (V)"),
             ("current_a", "Current (A)"),
@@ -1348,7 +1395,10 @@ def build_report_data(df, report_title, observation, fig, df_dcm=None):
         ]
         dcm_summary = []
         for device_id, group in df_dcm.groupby("device_id"):
-            device_label = f"Meter {int(device_id)}" if pd.notna(device_id) else "Unknown meter"
+            try:
+                device_label = f"Meter {int(device_id)}"
+            except (TypeError, ValueError):
+                device_label = f"Meter {device_id}"
             for col, label in metric_defs:
                 if col not in group.columns:
                     continue
@@ -1385,17 +1435,17 @@ def preview_report_content(df, report_title, observation, fig, df_dcm=None):
     metadata_df = pd.DataFrame(report_data['metadata'], columns=["Field", "Value"]) if report_data['metadata'] else pd.DataFrame()
     st.dataframe(metadata_df, use_container_width=True, hide_index=True)
 
-    # Column Overview
-    st.markdown("## Column Overview")
-    st.write(report_data['columns'])
+    # Column Overview and Numeric Summary only exist when sensor data does
+    if report_data['columns']:
+        st.markdown("## Column Overview")
+        st.write(report_data['columns'])
 
-    # Numeric Summary
-    st.markdown("## Numeric Summary")
-    if report_data['numeric_summary']:
-        summary_df = pd.DataFrame(report_data['numeric_summary'])
-        st.dataframe(summary_df, use_container_width=True, hide_index=True)
-    else:
-        st.info("No numeric columns found")
+        st.markdown("## Numeric Summary")
+        if report_data['numeric_summary']:
+            summary_df = pd.DataFrame(report_data['numeric_summary'])
+            st.dataframe(summary_df, use_container_width=True, hide_index=True)
+        else:
+            st.info("No numeric columns found")
 
     # DC Meter Summary
     if report_data['dcm_summary']:
@@ -1403,16 +1453,33 @@ def preview_report_content(df, report_title, observation, fig, df_dcm=None):
         dcm_df = pd.DataFrame(report_data['dcm_summary'])
         st.dataframe(dcm_df, use_container_width=True, hide_index=True)
 
-    # Weather Graph
-    st.markdown("## Weather Graph")
-    st.pyplot(report_data['figure'])
+    # Weather Graph -- st.pyplot(None) would draw whatever stale figure
+    # matplotlib still holds, so skip the section when there is no chart.
+    if report_data['figure'] is not None:
+        st.markdown("## Weather Graph")
+        st.pyplot(report_data['figure'])
+
+
+def _word_table(doc, rows):
+    table = doc.add_table(rows=len(rows) + 1, cols=4)
+    table.style = "Table Grid"
+    for col_idx, header in enumerate(["Column", "Mean", "Min", "Max"]):
+        table.cell(0, col_idx).text = header
+    for row_idx, row_data in enumerate(rows, start=1):
+        table.cell(row_idx, 0).text = str(row_data["Column"])
+        table.cell(row_idx, 1).text = row_data["Mean"]
+        table.cell(row_idx, 2).text = row_data["Min"]
+        table.cell(row_idx, 3).text = row_data["Max"]
 
 
 def generate_word_report(df, report_title, observation, fig, df_dcm=None):
+    """The report as .docx BYTES. It used to return a BytesIO, which is fine
+    for a download button but fails in zipfile.writestr() -- so every batch
+    Word report broke the ZIP."""
     report_data = build_report_data(df, report_title, observation, fig, df_dcm=df_dcm)
 
     doc = Document()
-    doc.add_heading(report_data['title'], level=1)
+    doc.add_heading(str(report_data['title']), level=1)
 
     # Metadata Table
     table = doc.add_table(rows=len(report_data['metadata']), cols=2)
@@ -1420,53 +1487,50 @@ def generate_word_report(df, report_title, observation, fig, df_dcm=None):
 
     for i, (key, value) in enumerate(report_data['metadata']):
         table.cell(i, 0).text = key
-        table.cell(i, 1).text = value
+        table.cell(i, 1).text = str(value)
 
     # Column Overview
-    doc.add_heading("Column Overview", level=2)
-    doc.add_paragraph(report_data['columns'])
+    if report_data['columns']:
+        doc.add_heading("Column Overview", level=2)
+        doc.add_paragraph(report_data['columns'])
 
     # Numeric Summary
     if report_data['numeric_summary']:
         doc.add_heading("Numeric Summary", level=2)
-        summary_table = doc.add_table(rows=len(report_data['numeric_summary']) + 1, cols=4)
-        summary_table.style = "Table Grid"
-
-        headers = ["Column", "Mean", "Min", "Max"]
-        for col_idx, header in enumerate(headers):
-            summary_table.cell(0, col_idx).text = header
-
-        for row_idx, row_data in enumerate(report_data['numeric_summary'], start=1):
-            summary_table.cell(row_idx, 0).text = row_data["Column"]
-            summary_table.cell(row_idx, 1).text = row_data["Mean"]
-            summary_table.cell(row_idx, 2).text = row_data["Min"]
-            summary_table.cell(row_idx, 3).text = row_data["Max"]
+        _word_table(doc, report_data['numeric_summary'])
 
     # DC Meter Summary
     if report_data['dcm_summary']:
         doc.add_heading("DC Meter Summary", level=2)
-        dcm_table = doc.add_table(rows=len(report_data['dcm_summary']) + 1, cols=4)
-        dcm_table.style = "Table Grid"
+        _word_table(doc, report_data['dcm_summary'])
 
-        headers = ["Column", "Mean", "Min", "Max"]
-        for col_idx, header in enumerate(headers):
-            dcm_table.cell(0, col_idx).text = header
-
-        for row_idx, row_data in enumerate(report_data['dcm_summary'], start=1):
-            dcm_table.cell(row_idx, 0).text = row_data["Column"]
-            dcm_table.cell(row_idx, 1).text = row_data["Mean"]
-            dcm_table.cell(row_idx, 2).text = row_data["Min"]
-            dcm_table.cell(row_idx, 3).text = row_data["Max"]
-
-    # Weather Graph
-    doc.add_heading("Weather Graph", level=2)
-    img_stream = fig_to_image_bytes(report_data['figure'])
-    doc.add_picture(img_stream)
+    # Weather Graph. A report without chart columns, and every DC-only report,
+    # has no figure; fig.savefig on None was the "'NoneType' object has no
+    # attribute 'savefig'" failure. Width keeps the 300-dpi image on the page.
+    if report_data['figure'] is not None:
+        doc.add_heading("Weather Graph", level=2)
+        doc.add_picture(fig_to_image_bytes(report_data['figure']),
+                        width=Inches(6.5))
 
     buffer = BytesIO()
     doc.save(buffer)
-    buffer.seek(0)
-    return buffer
+    return buffer.getvalue()
+
+
+def _pdf_table(pdf, rows):
+    widths = (75, 35, 35, 35)
+    pdf.set_font("Helvetica", "B", 10)
+    for header, w in zip(["Column", "Mean", "Min", "Max"], widths):
+        pdf.cell(w, 8, header, border=1)
+    pdf.ln()
+
+    pdf.set_font("Helvetica", size=10)
+    for row_data in rows:
+        pdf.cell(widths[0], 8, _pdf_text(row_data["Column"]), border=1)
+        pdf.cell(widths[1], 8, _pdf_text(row_data["Mean"]), border=1)
+        pdf.cell(widths[2], 8, _pdf_text(row_data["Min"]), border=1)
+        pdf.cell(widths[3], 8, _pdf_text(row_data["Max"]), border=1)
+        pdf.ln()
 
 
 def generate_pdf_report(df, report_title, observation, fig, df_dcm=None):
@@ -1477,7 +1541,8 @@ def generate_pdf_report(df, report_title, observation, fig, df_dcm=None):
 
     # Title
     pdf.set_font("Helvetica", "B", 16)
-    pdf.cell(0, 10, report_data['title'], new_x="LMARGIN", new_y="NEXT")
+    pdf.multi_cell(0, 10, _pdf_text(report_data['title']),
+                   new_x="LMARGIN", new_y="NEXT")
 
     # Metadata Table
     pdf.ln(5)
@@ -1488,72 +1553,42 @@ def generate_pdf_report(df, report_title, observation, fig, df_dcm=None):
 
     pdf.set_font("Helvetica", size=10)
     for key, value in report_data['metadata']:
-        pdf.cell(50, 8, key, border=1)
-        pdf.cell(130, 8, str(value), border=1)
-        pdf.ln()
+        pdf.cell(50, 8, _pdf_text(key), border=1)
+        # multi_cell so a long observation note wraps instead of running off
+        # the page; a blank value needs a space or fpdf has nothing to draw.
+        pdf.multi_cell(130, 8, _pdf_text(value) or " ", border=1,
+                       new_x="LMARGIN", new_y="NEXT")
 
     # Column Overview
-    pdf.ln(5)
-    pdf.set_font("Helvetica", "B", 13)
-    pdf.cell(0, 10, "Column Overview", new_x="LMARGIN", new_y="NEXT")
+    if report_data['columns']:
+        pdf.ln(5)
+        pdf.set_font("Helvetica", "B", 13)
+        pdf.cell(0, 10, "Column Overview", new_x="LMARGIN", new_y="NEXT")
 
-    pdf.set_font("Helvetica", size=10)
-    pdf.multi_cell(0, 8, report_data['columns'])
+        pdf.set_font("Helvetica", size=10)
+        pdf.multi_cell(0, 8, _pdf_text(report_data['columns']),
+                       new_x="LMARGIN", new_y="NEXT")
 
     # Numeric Summary
     if report_data['numeric_summary']:
         pdf.ln(5)
         pdf.set_font("Helvetica", "B", 13)
         pdf.cell(0, 10, "Numeric Summary", new_x="LMARGIN", new_y="NEXT")
-
-        pdf.set_font("Helvetica", "B", 10)
-        headers = ["Column", "Mean", "Min", "Max"]
-        for header in headers:
-            pdf.cell(45, 8, header, border=1)
-        pdf.ln()
-
-        pdf.set_font("Helvetica", size=10)
-        for row_data in report_data['numeric_summary']:
-            pdf.cell(45, 8, str(row_data["Column"]), border=1)
-            pdf.cell(45, 8, row_data["Mean"], border=1)
-            pdf.cell(45, 8, row_data["Min"], border=1)
-            pdf.cell(45, 8, row_data["Max"], border=1)
-            pdf.ln()
+        _pdf_table(pdf, report_data['numeric_summary'])
 
     # DC Meter Summary
     if report_data['dcm_summary']:
         pdf.ln(5)
         pdf.set_font("Helvetica", "B", 13)
         pdf.cell(0, 10, "DC Meter Summary", new_x="LMARGIN", new_y="NEXT")
+        _pdf_table(pdf, report_data['dcm_summary'])
 
-        pdf.set_font("Helvetica", "B", 10)
-        headers = ["Column", "Mean", "Min", "Max"]
-        for header in headers:
-            pdf.cell(45, 8, header, border=1)
-        pdf.ln()
-
-        pdf.set_font("Helvetica", size=10)
-        for row_data in report_data['dcm_summary']:
-            pdf.cell(45, 8, str(row_data["Column"]), border=1)
-            pdf.cell(45, 8, row_data["Mean"], border=1)
-            pdf.cell(45, 8, row_data["Min"], border=1)
-            pdf.cell(45, 8, row_data["Max"], border=1)
-            pdf.ln()
-
-    # Weather Graph
-    pdf.ln(5)
-    pdf.set_font("Helvetica", "B", 13)
-    pdf.cell(0, 10, "Weather Graph", new_x="LMARGIN", new_y="NEXT")
-
-    img_stream = fig_to_image_bytes(report_data['figure'])
-
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp:
-        tmp.write(img_stream.getvalue())
-        temp_image_path = tmp.name
-
-    pdf.image(temp_image_path, w=180)
-
-    os.unlink(temp_image_path)
+    # Weather Graph (skipped when there is no figure; see generate_word_report)
+    if report_data['figure'] is not None:
+        pdf.ln(5)
+        pdf.set_font("Helvetica", "B", 13)
+        pdf.cell(0, 10, "Weather Graph", new_x="LMARGIN", new_y="NEXT")
+        pdf.image(fig_to_image_bytes(report_data['figure']), w=180)
 
     return bytes(pdf.output())
 
