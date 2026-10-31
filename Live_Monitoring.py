@@ -14,6 +14,9 @@ from ui_sections import (
     fetch_latest_readings,
     fetch_recent_alerts,
     fetch_latest_panel_readings,
+    fetch_overview_frames,
+    latest_per_column,
+    LINE_CHART_MAX_POINTS,
 )
 from drive_fetch import (
     list_available_csvs,
@@ -26,6 +29,7 @@ from drive_fetch import (
     download_and_combine_dcm_csvs,
     list_available_filled_csvs,
     download_and_combine_filled_csvs,
+    refresh_modified_times,
     FILLED_FLAG_SUFFIX,
 )
 
@@ -122,6 +126,103 @@ def _downsample_for_plot(df, time_col="created_at", max_points=MAX_PLOT_POINTS):
         return df
     step = max(1, len(df) // max_points)
     return df.iloc[::step].copy()
+
+
+# ---------------------------------------------------------------------------
+#  Work that only needs redoing when the loaded history changes
+# ---------------------------------------------------------------------------
+# Each auto-refresh tick reruns both fragments below. The live part of the
+# data (200 rows from the database) really is new every tick, but the
+# historical part -- a whole day or more from Drive -- only changes when a
+# range is loaded, cleared, or the 15-minute Drive sync merges new rows.
+# Re-slicing, re-parsing and re-pivoting it on every tick was most of the
+# work each tick did once history was loaded. Each history slot now carries a
+# version number that is bumped whenever its frame is replaced, and derived
+# frames are kept in session state against (slot, version, selection).
+
+def _set_hist(key_prefix, df):
+    """Replace a slot's historical frame and invalidate anything derived
+    from it."""
+    st.session_state[f"_{key_prefix}_df"] = df
+    ver_key = f"_{key_prefix}_ver"
+    st.session_state[ver_key] = st.session_state.get(ver_key, 0) + 1
+
+
+def _hist_ver(key_prefix):
+    return st.session_state.get(f"_{key_prefix}_ver", 0)
+
+
+def _memo(name, signature, build):
+    """build() once per signature, kept in session state. One entry per
+    name, so a stale result is replaced rather than accumulated."""
+    key = f"_memo_{name}"
+    hit = st.session_state.get(key)
+    if hit is not None and hit[0] == signature:
+        return hit[1]
+    value = build()
+    st.session_state[key] = (signature, value)
+    return value
+
+
+def _prepare_irr_history(df_hist, selected, flag_cols):
+    """The selected sensor columns of the loaded history, ready to append the
+    live rows to: timestamps parsed, flags boolean, sorted."""
+    hist_slice = df_hist.reindex(columns=["created_at"] + selected + flag_cols).copy()
+
+    # _load_range already returns timezone-naive LOCAL times -- see the
+    # conversion at the end of that function. Converting again here added a
+    # second eight hours, so a 13:14 reading plotted at 21:14. Parse only; do
+    # not shift.
+    hist_slice["created_at"] = pd.to_datetime(hist_slice["created_at"], errors="coerce")
+
+    # Raw history has no flag columns at all, so reindex left them NaN: a raw
+    # reading is a measured one.
+    for flag_col in flag_cols:
+        hist_slice[flag_col] = hist_slice[flag_col].fillna(False).astype(bool)
+
+    hist_slice = hist_slice.dropna(subset=["created_at"])
+    return hist_slice.sort_values("created_at").reset_index(drop=True)
+
+
+_DCM_COLS = ["created_at", "device_id", "voltage_v", "current_a",
+             "active_power_kw", "forward_energy_kwh", "error"]
+
+
+def _prepare_dcm_history(df_dcm_hist):
+    """The loaded DC-meter history trimmed to the columns the charts use,
+    timestamps parsed, sorted."""
+    hist = df_dcm_hist.reindex(columns=_DCM_COLS).copy()
+    # Already local, for the same reason as the sensor chart.
+    hist["created_at"] = pd.to_datetime(hist["created_at"], errors="coerce")
+    hist = hist.dropna(subset=["created_at"])
+    return hist.sort_values("created_at").reset_index(drop=True)
+
+
+def _pivot_meters(frame, devices, metric):
+    """One column per selected meter, indexed by time."""
+    if frame is None or frame.empty:
+        return pd.DataFrame()
+    part = frame[frame["device_id"].isin(devices)]
+    if part.empty:
+        return pd.DataFrame()
+    return part.pivot_table(index="created_at", columns="device_id",
+                            values=metric)
+
+
+def _merge_pivots(hist_piv, live_piv):
+    """History pivot plus live pivot, as one time-indexed frame. Where both
+    hold the same timestamp the readings are averaged, which is what pivoting
+    the combined rows used to do."""
+    if live_piv is None or live_piv.empty:
+        return hist_piv if hist_piv is not None else pd.DataFrame()
+    if hist_piv is None or hist_piv.empty:
+        return live_piv
+    both = pd.concat([hist_piv, live_piv])
+    if both.index.has_duplicates:
+        both = both.groupby(level=0).mean()
+    elif not both.index.is_monotonic_increasing:
+        both = both.sort_index()
+    return both.reindex(columns=sorted(both.columns))
 
 
 def _load_range(period_files, download_fn, build_created_at, start_date, end_date):
@@ -239,6 +340,14 @@ def _sync_drive_history_if_due(key_prefix, available_files, download_fn, build_c
     # identity changed between checks, which is exactly the Supabase-missed
     # data this exists to backfill.
     # ---------------------------------------------------------
+    # The listing is cached (and refreshed in the background), so the
+    # modifiedTime it carries can be several minutes old -- old enough that
+    # the per-file download cache would hand back the previous version of
+    # today's file and this sync would merge nothing new. Ask Drive for the
+    # current modifiedTime of just these files (one small call each) instead
+    # of re-walking the whole folder tree.
+    today_files = refresh_modified_times(today_files)
+
     try:
         df_fresh = _load_range(today_files, download_fn, build_created_at, today, today)
 
@@ -262,7 +371,7 @@ def _sync_drive_history_if_due(key_prefix, available_files, download_fn, build_c
                       .reset_index(drop=True)
             )
 
-        st.session_state[f"_{key_prefix}_df"] = merged
+        _set_hist(key_prefix, merged)
         st.session_state[f"_{key_prefix}_today_signature"] = tuple(
             (f["id"], f.get("modifiedTime", "")) for f in today_files
         )
@@ -415,7 +524,7 @@ def _historical_append_controls(key_prefix, available_files, download_fn, build_
             if today_files:
                 df_today = _load_range(today_files, download_fn, build_created_at, today, today)
 
-                st.session_state[f"_{key_prefix}_df"] = df_today
+                _set_hist(key_prefix, df_today)
                 st.session_state[f"_{key_prefix}_label"] = f"{today:%d %b %Y}"
                 st.session_state[f"_{key_prefix}_start_date"] = today
                 st.session_state[f"_{key_prefix}_end_date"] = today
@@ -509,7 +618,7 @@ def _historical_append_controls(key_prefix, available_files, download_fn, build_
     if go:
         with st.spinner(f"Loading {len(period_files)} file(s)..."):
             df_hist = _load_range(period_files, download_fn, build_created_at, start_date, end_date)
-        st.session_state[f"_{key_prefix}_df"] = df_hist
+        _set_hist(key_prefix, df_hist)
         st.session_state[f"_{key_prefix}_label"] = (
             f"{start_date:%d %b %Y} – {end_date:%d %b %Y}"
             if start_date != end_date
@@ -527,7 +636,7 @@ def _historical_append_controls(key_prefix, available_files, download_fn, build_
                 "✖️ Clear", key=f"{key_prefix}_remove_btn",
                 use_container_width=True,
             ):
-                st.session_state[f"_{key_prefix}_df"] = None
+                _set_hist(key_prefix, None)
                 st.session_state[f"_{key_prefix}_label"] = None
                 st.session_state[f"_{key_prefix}_start_date"] = None
                 st.session_state[f"_{key_prefix}_end_date"] = None
@@ -656,7 +765,7 @@ def render_live_monitoring():
         # when one of the three lost its decorator -- a refresh button should
         # never be able to do that.
         for _fn in (fetch_latest_readings, fetch_recent_alerts,
-                    fetch_latest_panel_readings):
+                    fetch_latest_panel_readings, fetch_overview_frames):
             clear = getattr(_fn, "clear", None)
             if callable(clear):
                 clear()
@@ -713,11 +822,17 @@ def render_live_monitoring():
         # stacks every device: a plain "meter-head" row (name + status),
         # readings underneath, reusing that exact CSS class for visual
         # consistency between the two sections.
+        # Each sensor's own most recent reading in the window, not whatever
+        # the very last row holds. The logger leaves cells blank in any given
+        # row, so reading only df_live.iloc[-1] showed working sensors as
+        # "No reading" -- the overview banner already does it this way.
+        latest_irr = latest_per_column(df_live, irr_cols)
+
         st.caption(f"{len(irr_cols)} sensors")
         for col in irr_cols:
-            reading = _fmt(latest[col], "W/m²")
+            reading = _fmt(latest_irr.get(col), "W/m²")
             label = col.replace("_", " ")
-            has_reading = pd.notna(pd.to_numeric(latest[col], errors="coerce"))
+            has_reading = col in latest_irr
             state = ('<span class="state ok">OK</span>' if has_reading
                      else '<span class="state bad">No reading</span>')
             st.markdown(f'<div class="meter-head">{label}{state}</div>',
@@ -843,20 +958,14 @@ def render_live_monitoring():
                 combined[flag_col] = False
 
             if df_hist is not None and not df_hist.empty:
-                hist_slice = df_hist.reindex(
-                    columns=["created_at"] + selected_live_irr + flag_cols).copy()
-
-                # _load_range already returns timezone-naive LOCAL times --
-                # see the conversion at the end of that function. Converting
-                # again here added a second eight hours, so a 13:14 reading
-                # plotted at 21:14. Parse only; do not shift.
-                hist_slice["created_at"] = pd.to_datetime(
-                    hist_slice["created_at"], errors="coerce")
-
-                # Raw history has no flag columns at all, so reindex left
-                # them NaN: a raw reading is a measured one.
-                for flag_col in flag_cols:
-                    hist_slice[flag_col] = hist_slice[flag_col].fillna(False).astype(bool)
+                # Prepared once per loaded history and sensor selection, not
+                # on every refresh tick -- see _memo.
+                hist_slice = _memo(
+                    "live_irr_hist",
+                    (irr_prefix, _hist_ver(irr_prefix), tuple(selected_live_irr)),
+                    lambda: _prepare_irr_history(df_hist, selected_live_irr,
+                                                 flag_cols),
+                )
 
                 combined = pd.concat(
                     [hist_slice, combined],
@@ -865,12 +974,10 @@ def render_live_monitoring():
 
             # Both historical and live timestamps are now
             # timezone-naive local timestamps.
-            combined = (
-                combined
-                .dropna(subset=["created_at"])
-                .sort_values("created_at")
-                .reset_index(drop=True)
-            )
+            combined = combined.dropna(subset=["created_at"])
+            if not combined["created_at"].is_monotonic_increasing:
+                combined = combined.sort_values("created_at")
+            combined = combined.reset_index(drop=True)
             with st.expander("📐 Chart scale (optional)"):
                 data_min_t = combined["created_at"].min().to_pydatetime()
                 data_max_t = combined["created_at"].max().to_pydatetime()
@@ -901,14 +1008,18 @@ def render_live_monitoring():
 
             # Thin before plotting. Sending half a million points to the
             # browser hangs the tab long before the extra detail becomes
-            # visible on screen. The __filled columns ride along in the same
-            # frame, so a thinned point keeps its own marking.
+            # visible on screen. plot_line_chart thins each sensor's trace on
+            # its own, keeping the highest and lowest reading in every stretch
+            # so spikes survive. The gap-filled overlay still uses an
+            # every-Nth-row sample (plot_src), where the __filled columns ride
+            # along in the same frame, so a thinned point keeps its own marking.
             plot_src = _downsample_for_plot(combined)
-            if len(plot_src) < len(combined):
+            if len(combined) > LINE_CHART_MAX_POINTS:
                 st.caption(
-                    f"Showing {len(plot_src):,} of {len(combined):,} points. "
-                    f"The shape of the trace is preserved; narrow the date "
-                    f"range to see every reading."
+                    f"Showing up to {LINE_CHART_MAX_POINTS:,} points per sensor "
+                    f"out of {len(combined):,} rows. Each stretch keeps its "
+                    f"highest and lowest reading, so spikes and dips stay "
+                    f"visible; narrow the date range to see every reading."
                 )
 
             has_irr = any(str(c).startswith("Irr_") for c in selected_live_irr)
@@ -921,7 +1032,7 @@ def render_live_monitoring():
                 y_title = "Irradiance (W/m²)"
 
             fig = plot_line_chart(
-                plot_src, "created_at", selected_live_irr,
+                combined, "created_at", selected_live_irr,
                 x_range=(x_start_t, x_end_t),
                 y_range=None if irr_chart_auto else (irr_chart_ymin, irr_chart_ymax),
                 x_title="Time (Malaysia, UTC+8)",
@@ -1055,53 +1166,34 @@ def render_live_monitoring():
                 download_and_combine_dcm_csvs,
             )
 
+        # df_panel["created_at"] was already converted from UTC to array-local
+        # naive time by to_local() at the top of this fragment. Re-labeling it
+        # "utc=True" and converting to Asia/Kuala_Lumpur AGAIN added a second
+        # +8-hour shift on top of that first one -- a reading actually taken at
+        # 16:30 local got stamped 00:30 the *next* calendar day, which is
+        # exactly what would break a whole-day 00:00-23:59 view. Parse only; do
+        # not shift again.
+        live_slice = df_panel.reindex(columns=_DCM_COLS).copy()
+        live_slice["created_at"] = pd.to_datetime(live_slice["created_at"],
+                                                  errors="coerce")
+
+        # The historical half is trimmed, parsed and sorted once per loaded
+        # range rather than on every refresh tick (see _memo). It used to be
+        # copied twice, concatenated with the live rows and re-sorted -- over a
+        # hundred thousand rows for one day of meter data -- every 15 seconds.
+        hist_ready = None
+        hist_sig = (dcm_prefix, _hist_ver(dcm_prefix))
         if df_dcm_hist is not None and not df_dcm_hist.empty:
-            df_panel_combined = df_dcm_hist.copy()
-        else:
-            df_panel_combined = df_panel.copy()
-        if df_dcm_hist is not None and not df_dcm_hist.empty:
-            needed_cols = [
-                "created_at", "device_id", "voltage_v", "current_a",
-                "active_power_kw", "forward_energy_kwh", "error",
-            ]
-            hist_slice = df_dcm_hist.reindex(columns=needed_cols).copy()
-            live_slice = df_panel.reindex(columns=needed_cols).copy()
-
-            # ---------------------------------------------------------
-            # NORMALIZE TIMESTAMPS
-            # ---------------------------------------------------------
-            # Both sides must end up as timezone-naive local time.
-            # ---------------------------------------------------------
-            # Already local, for the same reason as the sensor chart above.
-            hist_slice["created_at"] = pd.to_datetime(
-                hist_slice["created_at"], errors="coerce")
-
-            # df_panel["created_at"] was already converted from UTC to
-            # array-local naive time by to_local() at the top of this
-            # fragment. Re-labeling it "utc=True" here and converting to
-            # Asia/Kuala_Lumpur AGAIN added a second +8-hour shift on top of
-            # that first one -- a reading actually taken at 16:30 local got
-            # stamped 00:30 the *next* calendar day, which is exactly what
-            # would break a whole-day 00:00-23:59 view. Parse only; do not
-            # shift again.
-            live_slice["created_at"] = pd.to_datetime(
-                live_slice["created_at"], errors="coerce")
-
-            # ---------------------------------------------------------
-            # COMBINE HISTORICAL + LIVE
-            # ---------------------------------------------------------
-            df_panel_combined = pd.concat([hist_slice, live_slice], ignore_index=True)
-
-            # Remove invalid timestamps BEFORE sorting
-            df_panel_combined = (
-                df_panel_combined
-                .dropna(subset=["created_at"])
-                .sort_values("created_at")
-                .reset_index(drop=True)
-            )
+            hist_ready = _memo("dcm_hist", hist_sig,
+                               lambda: _prepare_dcm_history(df_dcm_hist))
 
         st.markdown("### Trend")
-        device_ids = sorted(df_panel_combined["device_id"].dropna().unique().tolist())
+        device_set = set(live_slice["device_id"].dropna().unique().tolist())
+        if hist_ready is not None:
+            device_set |= _memo(
+                "dcm_hist_ids", hist_sig,
+                lambda: set(hist_ready["device_id"].dropna().unique().tolist()))
+        device_ids = sorted(device_set)
         if "selected_devices" not in st.session_state:
             st.session_state.selected_devices = device_ids[:1]
         else:
@@ -1152,17 +1244,40 @@ def render_live_monitoring():
             st.radio("View", ["Trend over time", "Distribution"],
                      horizontal=True, key="meter_view")
 
+        pivot = pd.DataFrame()
         if selected_devices:
-            pivot = df_panel_combined[df_panel_combined["device_id"].isin(selected_devices)].pivot_table(
-                index="created_at", columns="device_id", values=metric_choice
-            )
-            pivot.columns = [f"Meter {int(c)}" for c in pivot.columns]
+            # Pivot the history once per (range, meters, metric) and the 200
+            # live rows every tick, then join the two -- instead of pivoting
+            # the whole combined frame on every tick.
+            live_piv = _pivot_meters(live_slice, selected_devices, metric_choice)
+            if hist_ready is not None:
+                hist_piv = _memo(
+                    "dcm_hist_pivot",
+                    hist_sig + (tuple(selected_devices), metric_choice),
+                    lambda: _pivot_meters(hist_ready, selected_devices,
+                                          metric_choice))
+                pivot = _merge_pivots(hist_piv, live_piv)
+            else:
+                pivot = live_piv
+            if pivot.empty:
+                st.info("No readings for the selected meters in the loaded data yet.")
+
+        if selected_devices and not pivot.empty:
+            # rename()/rename_axis() rather than assigning .columns: the pivot
+            # can be the memoised history object itself, which must not be
+            # altered in place or the next tick would see renamed columns.
+            pivot = (pivot.rename(columns=lambda c: f"Meter {int(c)}")
+                          .rename_axis("created_at"))
+            # Full resolution for the trend chart: plot_line_chart thins each
+            # meter's trace itself, keeping every stretch's highest and lowest
+            # reading, so short dips are not thinned away.
             pivot_reset = pivot.reset_index()
             n_full = len(pivot_reset)
-            pivot_reset = _downsample_for_plot(pivot_reset)
-            if len(pivot_reset) < n_full:
+            if n_full > LINE_CHART_MAX_POINTS:
                 st.caption(
-                    f"Showing {len(pivot_reset):,} of {n_full:,} points."
+                    f"Showing up to {LINE_CHART_MAX_POINTS:,} points per meter "
+                    f"out of {n_full:,} timestamps; each stretch keeps its "
+                    f"highest and lowest reading."
                 )
             meter_cols = [c for c in pivot_reset.columns if c != "created_at"]
 
@@ -1240,11 +1355,14 @@ def render_live_monitoring():
                 # Same numbers, different question. The trend says what a meter
                 # is doing now; the distribution says what it usually does, so a
                 # meter sitting left of the others is consistently low rather
-                # than momentarily low.
+                # than momentarily low. Built from an every-Nth-row sample, as
+                # before: an unbiased sample keeps the shape of a distribution,
+                # where the trend's keep-the-extremes thinning would not.
+                dist_src = _downsample_for_plot(pivot_reset)
                 import plotly.graph_objects as _go
                 hist = _go.Figure()
                 for c in meter_cols:
-                    vals = pd.to_numeric(pivot_reset[c], errors="coerce").dropna()
+                    vals = pd.to_numeric(dist_src[c], errors="coerce").dropna()
                     if len(vals):
                         hist.add_trace(_go.Histogram(x=vals, name=str(c),
                                                      opacity=0.55, nbinsx=40))
