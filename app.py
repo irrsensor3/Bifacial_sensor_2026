@@ -14,8 +14,7 @@ from ui_sections import (
     feature_cards,
     array_diagram,
     plot_gauge,
-    fetch_latest_readings,
-    fetch_latest_panel_readings,
+    fetch_overview_frames,
 )
 from Data_and_Reports import render_data_reports
 from Live_Monitoring import render_live_monitoring
@@ -110,14 +109,19 @@ def render_overview(expanded: bool):
     part anyone read -- so the numbers are now the design, at a size you can
     take in from across a desk.
     """
-    # 200 rows, not 5: the logger leaves most cells blank in any given row, so a
-    # handful of rows can miss a sensor's latest reading entirely and show a
-    # live channel as silent.
-    df_live = fetch_latest_readings(limit=200)
-    # 200 rows, not 5: the diagram needs at least one recent reading per meter,
-    # and the logger polls all 20 in sequence. With only 5 rows most panels
-    # would render unlit and the array would look half-dead.
-    df_panel = fetch_latest_panel_readings(limit=200)
+    # 200 rows (ui_sections.LIVE_ROWS), not 5: the logger leaves most cells
+    # blank in any given row, so a handful of rows can miss a sensor's latest
+    # reading entirely and show a live channel as silent. The diagram likewise
+    # needs at least one recent reading per meter, and the logger polls all 20
+    # in sequence.
+    #
+    # The underlying fetches are called with NO arguments. Streamlit keys its
+    # cache on the arguments as written, so fetch(limit=200) here and fetch()
+    # on Live Monitoring were two separate cache entries -- the same table
+    # queried twice per page load. Every caller now shares one entry, and the
+    # banner adds a 30-second layer on top (see fetch_overview_frames) so a
+    # click on another page doesn't re-query the database just to redraw it.
+    df_live, df_panel = fetch_overview_frames()
 
     front_irr, rear_irr, n_front, n_rear = split_irradiance(df_live)
     power = _average_power(df_panel)
