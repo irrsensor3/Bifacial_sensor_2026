@@ -44,10 +44,11 @@ import streamlit as st
 
 from drive_fetch import (
     list_available_csvs,
-    download_csv_as_df,
+    download_csv_cached,
     format_file_label,
     list_available_dcm_csvs,
-    download_dcm_csv_as_df,
+    download_dcm_csv_cached,
+    refresh_modified_times,
 )
 from report_presets import render_preset_bar
 from ui_sections import (
@@ -55,6 +56,7 @@ from ui_sections import (
     require_login,
     page_stamp,
     close_figures,
+    figure_png,
     plot_weather_signals,
     preview_report_content,
     generate_word_report,
@@ -190,12 +192,29 @@ def _axis_time(frame):
     return frame.index if col is None else frame[col]
 
 
-def _periods(frame, granularity):
-    """Period labels for every row, aligned to the frame's index."""
-    ts = _timestamps(frame)
-    if ts is None:
+def _periods(frame, granularity, source_key=None):
+    """Period labels for every row, aligned to the frame's index.
+
+    With source_key -- (kind, loaded file name) -- the result is kept in
+    session state, because the batch section asked for this on EVERY rerun,
+    re-parsing every timestamp in the file whenever a title letter or a
+    checkbox changed. One slot per kind ("weather", "dcm"), replaced when the
+    file, the split or the row count changes.
+    """
+    if frame is None:
         return None
-    return ts.dt.to_period(PERIOD_CODE[granularity])
+    memo = st.session_state.setdefault("_periods_memo", {})
+    sig = None
+    if source_key is not None:
+        sig = (source_key, granularity, len(frame))
+        hit = memo.get(source_key[0])
+        if hit is not None and hit[0] == sig:
+            return hit[1]
+    ts = _timestamps(frame)
+    out = None if ts is None else ts.dt.to_period(PERIOD_CODE[granularity])
+    if sig is not None:
+        memo[source_key[0]] = (sig, out)
+    return out
 
 
 def _slice(frame, periods, target):
@@ -310,7 +329,11 @@ def _report_parts(content, df_part, dcm_part):
 #  Single report
 # ---------------------------------------------------------------------------
 
-def _render_single(df, df_dcm, report_title, observation, fig, signature):
+def _render_single(df, df_dcm, report_title, observation, chart_png,
+                   fig_factory, signature):
+    """chart_png is the chart already on screen (for the preview);
+    fig_factory draws a fresh matplotlib figure for the document itself, and is
+    only called when a report is actually built."""
     st.subheader("Report")
     st.caption("The file as it is framed above, as one document.")
 
@@ -319,7 +342,7 @@ def _render_single(df, df_dcm, report_title, observation, fig, signature):
 
     if st.session_state.get("show_preview"):
         with st.expander("Report preview", expanded=True):
-            preview_report_content(df, report_title, observation, fig,
+            preview_report_content(df, report_title, observation, chart_png,
                                    df_dcm=df_dcm)
 
     # Build only on request: both documents used to be generated on EVERY
@@ -335,7 +358,9 @@ def _render_single(df, df_dcm, report_title, observation, fig, signature):
 
     if build:
         with st.spinner(f"Building the {fmt} report…"):
+            fig = None
             try:
+                fig = fig_factory() if fig_factory is not None else None
                 data, ext, mime = _build_report(
                     fmt, df, df_dcm, report_title, observation, fig)
                 st.session_state["_report_bytes"] = data
@@ -347,6 +372,9 @@ def _render_single(df, df_dcm, report_title, observation, fig, signature):
                 st.session_state["_report_bytes"] = None
                 st.session_state["_report_sig"] = None
                 st.error(f"The report could not be built: {exc}")
+            finally:
+                if fig is not None:
+                    close_figures([fig])
 
     # Withdraw a stale build rather than serving last file's numbers under
     # this file's name.
@@ -397,8 +425,12 @@ def _render_batch(df, df_dcm, report_title, observation,
     gran = st.radio("Split by", ["Day", "Month", "Year"],
                     horizontal=True, key="batch_gran")
 
-    per_weather = _periods(df, gran) if use_weather else None
-    per_dcm = _periods(df_dcm, gran) if use_dcm else None
+    per_weather = _periods(
+        df, gran, ("weather", st.session_state.get("_loaded_filename"))) \
+        if use_weather else None
+    per_dcm = _periods(
+        df_dcm, gran, ("dcm", st.session_state.get("_loaded_dcm_filename"))) \
+        if use_dcm else None
 
     if use_weather and per_weather is None and (not use_dcm or per_dcm is None):
         st.error(
@@ -598,7 +630,11 @@ def render_data_reports():
 
         if st.button("Load selected file"):
             try:
-                df = download_csv_as_df(selected_file["id"])
+                # Through the per-file cache: a day already opened here or on
+                # Live Monitoring loads from cache instead of Drive. The
+                # modifiedTime is re-read first (one small call) so today's
+                # still-growing file is never served from an older copy.
+                df = download_csv_cached(refresh_modified_times([selected_file])[0])
                 st.session_state["_loaded_df"] = df
                 st.session_state["_loaded_filename"] = selected_file["name"]
                 st.success(f"Loaded {selected_file['name']} ({df.shape[0]} rows)")
@@ -641,8 +677,8 @@ def render_data_reports():
 
         if st.button("Load DC meter file"):
             try:
-                df_dcm = _dcm_to_local(
-                    download_dcm_csv_as_df(selected_dcm_file["id"]))
+                df_dcm = _dcm_to_local(download_dcm_csv_cached(
+                    refresh_modified_times([selected_dcm_file])[0]))
                 st.session_state["_loaded_dcm_df"] = df_dcm
                 st.session_state["_loaded_dcm_filename"] = selected_dcm_file["name"]
                 st.success(
@@ -742,7 +778,6 @@ def render_data_reports():
         key="selected_irradiance", label_visibility="collapsed")
 
     temp_ylim = irr_ylim = None
-    fig = None
 
     if selected_temps or selected_irradiance:
         for key, default in (("temp_y_auto", True), ("temp_y_min", 0.0),
@@ -796,19 +831,42 @@ def render_data_reports():
                        f"{len(sliced):,}) for speed. Reports do the same; the "
                        f"tables in them still use every row.")
 
-        fig = plot_weather_signals(
-            _axis_time(thin),
-            {c: thin[c].tolist() for c in selected_temps},
-            {c: thin[c].tolist() for c in selected_irradiance},
-            temp_ylim=temp_ylim,
-            irr_ylim=irr_ylim,
-        )
-        st.pyplot(fig)
+        def make_fig(thin=thin, temps=tuple(selected_temps),
+                     irrs=tuple(selected_irradiance), t_lim=temp_ylim,
+                     i_lim=irr_ylim):
+            return plot_weather_signals(
+                _axis_time(thin),
+                {c: thin[c].tolist() for c in temps},
+                {c: thin[c].tolist() for c in irrs},
+                temp_ylim=t_lim,
+                irr_ylim=i_lim,
+            )
+
+        # Matplotlib redrew this chart on EVERY rerun of the page -- typing a
+        # report title, ticking a box in the batch section -- which is most of
+        # what made the page feel sluggish. It is drawn once per framing and
+        # the picture reused; anything that changes the chart changes the key.
+        chart_key = (st.session_state.get("_loaded_filename"), len(df),
+                     tuple(selected_temps), tuple(selected_irradiance),
+                     x_start, x_end, temp_ylim, irr_ylim)
+        cached = st.session_state.get("_chart_png")
+        if cached is not None and cached[0] == chart_key:
+            chart_png = cached[1]
+        else:
+            fig = make_fig()
+            try:
+                chart_png = figure_png(fig)
+            finally:
+                close_figures([fig])
+            st.session_state["_chart_png"] = (chart_key, chart_png)
+        st.image(chart_png)
+        fig_factory = make_fig
     else:
         # No chart, but the report is still buildable -- a DC-meter-only
         # document has no weather trace to draw, and requiring one is what
         # made that combination unreachable before.
         x_start, x_end = 0, max(n_rows - 1, 0)
+        chart_png = fig_factory = None
         st.caption("No chart columns selected. Reports will be built without "
                    "a weather chart.")
 
@@ -847,13 +905,10 @@ def render_data_reports():
     # weather chart even when one is on screen.
     single_df, single_dcm = _report_parts(
         single_content, df.iloc[x_start:x_end + 1], df_dcm)
-    report_fig = None if single_content == CONTENT_DCM else fig
+    with_chart = single_content != CONTENT_DCM
     _render_single(single_df, single_dcm, report_title, observation,
-                   report_fig, signature)
+                   chart_png if with_chart else None,
+                   fig_factory if with_chart else None, signature)
 
     _render_batch(df, df_dcm, report_title, observation,
                   selected_temps, selected_irradiance, temp_ylim, irr_ylim)
-
-    # matplotlib figures were never released; every rerun made more
-    if fig is not None:
-        close_figures([fig])
